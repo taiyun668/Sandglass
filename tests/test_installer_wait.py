@@ -157,13 +157,29 @@ class InstallerWaitTests(unittest.TestCase):
                         root.mkdir()
                         locked.write_bytes(b"fixture")
                     ready = Path(tmp) / f"holder-{Path(powershell).stem}.ready"
+                    error = Path(tmp) / f"holder-{Path(powershell).stem}.err"
                     holder_script = Path(tmp) / f"holder-{Path(powershell).stem}.ps1"
                     holder_script.write_text(
-                        "param([string]$Locked, [string]$Ready)\n"
-                        "$f=[IO.File]::Open($Locked,'Open','ReadWrite','None')\n"
-                        "[IO.File]::WriteAllText($Ready, 'ready')\n"
-                        "Start-Sleep -Milliseconds 1200\n"
-                        "$f.Dispose()\n",
+                        "param([string]$Locked, [string]$Ready, [string]$ErrorFile)\n"
+                        "$ErrorActionPreference = 'Stop'\n"
+                        "try {\n"
+                        "  $deadline = [datetime]::UtcNow.AddSeconds(8)\n"
+                        "  $f = $null\n"
+                        "  while ($null -eq $f) {\n"
+                        "    try {\n"
+                        "      $f = [IO.File]::Open($Locked,'Open','ReadWrite','None')\n"
+                        "    } catch {\n"
+                        "      if ([datetime]::UtcNow -ge $deadline) { throw }\n"
+                        "      Start-Sleep -Milliseconds 50\n"
+                        "    }\n"
+                        "  }\n"
+                        "  [IO.File]::WriteAllText($Ready, 'ready')\n"
+                        "  Start-Sleep -Milliseconds 1200\n"
+                        "  $f.Dispose()\n"
+                        "} catch {\n"
+                        "  [IO.File]::WriteAllText($ErrorFile, $_.Exception.ToString())\n"
+                        "  throw\n"
+                        "}\n",
                         encoding="utf-8",
                     )
                     holder = subprocess.Popen(
@@ -171,15 +187,21 @@ class InstallerWaitTests(unittest.TestCase):
                             powershell, "-NoLogo", "-NoProfile",
                             "-ExecutionPolicy", "Bypass", "-File",
                             str(holder_script), str(locked), str(ready),
+                            str(error),
                         ],
                         cwd=ROOT,
                     )
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + 10
                     while time.monotonic() < deadline and not ready.exists():
                         if holder.poll() is not None:
                             break
                         time.sleep(0.05)
-                    self.assertTrue(ready.exists(), "file-lock holder did not start")
+                    why = error.read_text(encoding="utf-8", errors="replace") if error.exists() else ""
+                    self.assertTrue(
+                        ready.exists(),
+                        "file-lock holder did not start"
+                        + (f" (exit={holder.poll()}): {why}" if why or holder.poll() is not None else ""),
+                    )
                     runner = Path(tmp) / f"cleanup-{Path(powershell).stem}.ps1"
                     runner.write_text(
                         "$ErrorActionPreference = 'Stop'\n"
