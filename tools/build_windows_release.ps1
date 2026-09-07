@@ -158,5 +158,27 @@ if (-not $SkipInstaller) {
 $checksums = Join-Path $dist "SHA256SUMS.windows"
 python -m tools.windows_release checksums $checksums @artifacts
 if ($LASTEXITCODE -ne 0) { throw "Windows checksum generation failed." }
+# Signing the manifest is what lets an already-installed copy accept this build
+# as ours without a code-signing certificate. It happens here rather than as a
+# step the Owner has to remember, and it stays out of CI because the key is not
+# there -- which is also what keeps a release a deliberate act.
+$releaseKey = Join-Path $env:USERPROFILE ".sandglass\release-key.txt"
+if (Test-Path -LiteralPath $releaseKey) {
+    & (Join-Path $PSScriptRoot "sign_release_manifest.ps1") -PrivateKey $releaseKey -Manifest $checksums
+    Write-Output "Manifest signature: $checksums.sig"
+    $keyBackup = ""
+    . (Join-Path $PSScriptRoot "release_key_locations.ps1")
+    foreach ($location in Get-ReleaseKeyLocations) {
+        $probe = Join-Path (Join-Path $location.Path "Sandglass") "release-key-backup.txt"
+        if (Test-Path -LiteralPath $probe) { $keyBackup = $probe; break }
+    }
+    if (-not $keyBackup) {
+        Write-Warning "The release key has no backup copy. If this disk dies, every installed copy stops being able to update. Run tools/sign_release_manifest.ps1 -NewKey on a fresh key, or copy $releaseKey somewhere that leaves this machine."
+    }
+} else {
+    Write-Output "No release key at $releaseKey, so this candidate carries no manifest signature."
+    Write-Output "Run tools/sign_release_manifest.ps1 -NewKey once to create one."
+}
+
 Write-Output "Windows release candidate: $($artifacts -join ', ')"
 Write-Output "Checksums: $checksums"

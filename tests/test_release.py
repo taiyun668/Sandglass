@@ -521,6 +521,45 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("not stable public integration contracts", (ROOT / "SUPPORT.md").read_text(encoding="utf-8"))
 
 
+class SigningClaimsAgreeTests(unittest.TestCase):
+    """A sponsor's name on the front page is a claim, and it was once false.
+
+    The public README said "Free code signing provided by SignPath.io,
+    certificate by SignPath Foundation" while there was no account, no
+    application and no certificate -- the attribution a sponsor asks for once
+    it sponsors you, published before it did. Nothing caught it because no two
+    files had to agree.
+
+    They do now. Whichever way the project's state moves, these two say the
+    same thing about it.
+    """
+
+    def test_no_sponsor_is_named_while_there_is_no_account(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        workflow = (ROOT / "docs" / "signing-workflow.md").read_text(encoding="utf-8")
+        no_account = "no SignPath account" in workflow
+
+        named = [
+            sponsor for sponsor in ("SignPath", "Certum", "DigiCert", "Sectigo",
+                                    "Trusted Signing")
+            if sponsor in readme
+        ]
+        if no_account:
+            self.assertEqual(
+                named, [],
+                "签名工作流说没有账号,README 却已经把赞助方的名字挂出去了",
+            )
+            self.assertIn(
+                "not Authenticode-signed yet", readme,
+                "没有证书时,README 必须自己说清楚,而不是留给用户去猜",
+            )
+        else:
+            self.assertTrue(
+                named,
+                "已经有签名账号了,README 应当按对方要求给出署名",
+            )
+
+
 class RunningInstallLifecycleTests(unittest.TestCase):
     """Installing and uninstalling while Sandglass runs.
 

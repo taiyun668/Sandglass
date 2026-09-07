@@ -19,10 +19,10 @@ clears when the product is restarted from the current checkout. `codex 开账后
 
 **What blocks a release, in order:**
 
-1. **Code signing. Owner's, and it is the real gate.** Not paperwork:
-   `update.py`'s `download_verified()` refuses any installer Windows does not
-   trust, checksum match or not -- so an unsigned build ships with its own
-   update path dead from day one. The fail-closed NSIS path and the inner
+1. **Code signing. Owner's.** It decides what a first-time user sees --
+   SmartScreen, Smart App Control, and whether the publisher has a name -- and
+   nothing below removes that. It no longer decides whether the update channel
+   works: see the release-manifest signature item under P1. The fail-closed NSIS path and the inner
    request ZIP from `9e148f9` are ready. GitHub origin is public. Still
    needed: SignPath Foundation application, GitHub App, then the four CI
    values (`SIGNPATH_API_TOKEN` and the three variables) so main can submit
@@ -729,6 +729,68 @@ it as a release blocker, and do not make it green.
 - [x] Embed clean-commit build provenance and exact web/i18n/native-bridge hashes
   in every Windows bundle; make bundle inspection reject a dirty, malformed or
   resource-mismatched manifest, and expose it through runtime diagnostics.
+- [x] The public README claimed a sponsorship that does not exist. It said
+  "Free code signing provided by SignPath.io, certificate by SignPath
+  Foundation" -- the attribution SignPath asks for once it sponsors a project,
+  published before any account, application or certificate existed, and it was
+  live on the public repository. Corrected to what is true: the binaries are
+  not Authenticode-signed, an installer shows an unknown publisher, and what is
+  protected is the update path. A sponsor's name goes up if and when that
+  sponsor exists. `docs/signing-workflow.md` now leads with the same fact.
+  Nothing caught this because no two files had to agree, so now they do:
+  `SigningClaimsAgreeTests` fails if the README names a signing sponsor while
+  the workflow doc says there is no account, and fails the other way once there
+  is one. Mutation: put the sponsorship line back and it fails
+  `['SignPath'] != []`.
+  **The public branch still carries the old wording** -- it is a separate,
+  squashed history and this correction is only on local `main`. Publishing it
+  is the next push.
+- [x] The update channel no longer waits on a certificate. `download_verified()`
+  required an Authenticode signature Windows trusts, so with no certificate no
+  build was installable at all -- and the certificate was blocked behind
+  SignPath's reputation requirement, which cannot be met by a project that has
+  never shipped. That deadlock was self-inflicted: what an updater has to know
+  is that these bytes came from the same place the last ones did, and
+  Authenticode answers a different, more expensive question.
+  It now accepts either proof. The second one is an ECDSA P-256 signature over
+  the checksum manifest, made with a key the Owner generates and keeps, and
+  verified through Windows CNG -- no new dependency and no hand-written crypto,
+  the same shape as `authenticode_valid` one DLL further down. The manifest
+  names the installer's digest, so signing it covers the installer.
+  `RELEASE_PUBLIC_KEY` is empty until the Owner publishes one; while it is
+  empty nothing changes. Once set, a release whose manifest is not signed with
+  it is not offered -- an unsigned manifest is either older than the key or not
+  ours. **The Owner's part is one command, once:**
+  `tools/sign_release_manifest.ps1 -NewKey`. It generates the key, stores it at
+  `%USERPROFILE%\.sandglass\release-key.txt` -- outside the repository and outside
+  the build tree -- and writes the matching public key into `sandglass/update.py`
+  itself, because asking someone to paste a hex string into a source file is a
+  step that goes wrong silently. From then on `build_windows_release.ps1` signs
+  each manifest by itself when the key is present, and says plainly when it is
+  not. `-NewKey` is refused while a key is already declared and leaves no second
+  key behind: rotating one stops every installed copy from updating, so it has
+  The backup is taken by the setup, not asked for -- and only called a backup
+  when it is one. A cloud folder existing proves nothing: Windows ships the
+  OneDrive client and creates `%USERPROFILE%\OneDrive` whether or not anyone
+  signed in, and on this machine it is there, blank in the registry, syncing
+  nowhere. Each candidate is therefore admitted on its account -- OneDrive's
+  `UserEmail`/`UserFolder`, Google Drive's `CurrentAccountToken` plus its
+  mounted drive -- never on a directory being present.
+  `tools/release_key_locations.ps1` is the single place that decides, shared
+  by the setup and the release build, because two copies of that rule would
+  drift and one of them would be the one telling the Owner their key is safe.
+  On this machine it resolves to `G:\My Drive` (signed in) ahead of Documents
+  (which it labels as not leaving the disk). `-NoBackup` opts out.
+  to be deliberate. Verified end to end in a scratch copy -- the key it wrote
+  into update.py verifies a signature made with the private half it kept, and
+  the verifier refuses a changed manifest. The private key stays off this
+  repository and off CI, which also keeps every release a deliberate act.
+  **What it does not do:** nothing for SmartScreen, nothing for Smart App
+  Control, and nothing for a first-time installer, who still sees an unknown
+  publisher. Signing remains the destination; this removes it from the critical
+  path. Mutation: revert to Authenticode-only and the signed-manifest download
+  is refused with the production error; drop the key-implies-signature rule and
+  an unsigned manifest gets offered while a key is published.
 - [x] Select the owner-controlled code-signing identity and certificate route.
   **Decided 2026-09-07: SignPath Foundation, and the repository goes public.**
   Public was not really a choice: `update.py` points its feed at

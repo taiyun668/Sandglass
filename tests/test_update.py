@@ -58,8 +58,18 @@ class OfferTests(unittest.TestCase):
         self.assertEqual(update.offer_from(self._release(tag="v0.0.1")), {})
 
     def test_a_complete_release_is_offered_with_its_checksum(self):
+        """States which world it is testing rather than inheriting the shipped key.
+
+        This passed for as long as RELEASE_PUBLIC_KEY happened to be empty and
+        broke the moment a real one was generated -- a test whose result came
+        from the developer's machine rather than from what it asserts. The
+        signed-manifest requirement has its own test; this one is about a
+        release that carries a checksum, in a build that declares no key.
+        """
         digest = "a" * 64
-        with patch.object(update, "_get", return_value=(digest + "  " + self.ASSET).encode()):
+        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+            update, "_get", return_value=(digest + "  " + self.ASSET).encode()
+        ):
             offer = update.offer_from(self._release())
         self.assertEqual(offer["version"], "9.9.9")
         self.assertEqual(offer["sha256"], digest)
@@ -294,3 +304,112 @@ class CheckStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# A P-256 key pair generated once for these tests. The private half was thrown
+# away after signing the vector below; nothing here is a release key.
+_TEST_PUBLIC_KEY = (
+    "CA3B30B13893B5CEFD938F7E6F2C407FCB3FCFCE8B60EA8192E8E01543BACE7D"
+    "72D7C151EB817EF5F8A3B7CC04A88E584B47A09C88EA0AA7E13A11B855EB677B"
+)
+_TEST_PAYLOAD = b"sandglass release test"
+_TEST_SIGNATURE = bytes.fromhex(
+    "44E5C332103DB94148F732E1F426F531E8CF317AFC781AC34F39E0AFE36FC29F"
+    "1EC50AD21ED5B4012924641D64A78548308B7A5C8CAA988A9D9D68BD04268630"
+)
+
+
+class ReleaseSignatureTests(unittest.TestCase):
+    """A signature the Owner can make without owning a certificate.
+
+    Authenticode answers whether Windows trusts the publisher, and that answer
+    costs a certificate. This one answers whether the bytes came from the same
+    place the last ones did, which is the question an updater actually has to
+    ask, and it costs a key the Owner generates. Verified through Windows CNG,
+    so no dependency and no hand-written crypto.
+    """
+
+    def test_the_key_verifies_what_it_signed(self):
+        from sandglass.release_signature import verify_release_signature
+
+        self.assertTrue(verify_release_signature(
+            _TEST_PAYLOAD, _TEST_SIGNATURE, _TEST_PUBLIC_KEY))
+
+    def test_everything_else_is_refused(self):
+        from sandglass.release_signature import verify_release_signature
+
+        tampered_signature = bytearray(_TEST_SIGNATURE)
+        tampered_signature[0] ^= 1
+        other_key = "aa" * 64
+        cases = {
+            "payload changed": (b"sandglass release TEST", _TEST_SIGNATURE, _TEST_PUBLIC_KEY),
+            "signature changed": (_TEST_PAYLOAD, bytes(tampered_signature), _TEST_PUBLIC_KEY),
+            "another key": (_TEST_PAYLOAD, _TEST_SIGNATURE, other_key),
+            "no key at all": (_TEST_PAYLOAD, _TEST_SIGNATURE, ""),
+            "key of the wrong size": (_TEST_PAYLOAD, _TEST_SIGNATURE, "ab" * 10),
+            "signature of the wrong size": (_TEST_PAYLOAD, _TEST_SIGNATURE[:32], _TEST_PUBLIC_KEY),
+        }
+        for name, (payload, signature, key) in cases.items():
+            with self.subTest(case=name):
+                self.assertFalse(verify_release_signature(payload, signature, key))
+
+
+class ManifestSignedUpdateTests(unittest.TestCase):
+    """The half of the gate that does not need a certificate."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _serve(self, payload):
+        class Response:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def read(self_inner, size=-1):
+                chunk, Response.body = Response.body, b""
+                return chunk
+
+        Response.body = payload
+        return lambda *a, **k: Response()
+
+    def test_a_signed_manifest_stands_in_for_a_certificate(self):
+        """Otherwise no build is installable until the certificate question is
+        settled, and that question is not one the update channel needs answered.
+        """
+        payload = b"MZ" + bytes(32)
+        target = self.root / "setup.exe"
+        offer = {"url": "https://github.com/a/b/setup.exe", "asset": "setup.exe",
+                 "sha256": hashlib.sha256(payload).hexdigest(), "manifest_signed": True}
+        with patch("urllib.request.urlopen", self._serve(payload)), patch.object(
+            update, "authenticode_valid", return_value=False
+        ):
+            kept = update.download_verified(offer, target)
+
+        self.assertTrue(kept.exists())
+        self.assertEqual(kept.read_bytes(), payload)
+
+    def test_a_release_without_a_signed_manifest_is_not_offered_once_a_key_exists(self):
+        """A published key means every later release carries a signed manifest.
+
+        One that does not is either older than the key or not ours.
+        """
+        release = {
+            "tag_name": "v9.9.9",
+            "assets": [
+                {"name": "Sandglass-9.9.9-windows-x64-setup.exe",
+                 "browser_download_url": "https://github.com/a/b/setup.exe"},
+                {"name": "SHA256SUMS.windows",
+                 "browser_download_url": "https://github.com/a/b/SHA256SUMS.windows"},
+            ],
+        }
+        sums = (b"a" * 64) + b" *Sandglass-9.9.9-windows-x64-setup.exe" + bytes((10,))
+        with patch.object(update, "_get", return_value=sums):
+            with patch.object(update, "RELEASE_PUBLIC_KEY", ""):
+                self.assertTrue(update.offer_from(release), "没有密钥时行为不该改变")
+            with patch.object(update, "RELEASE_PUBLIC_KEY", _TEST_PUBLIC_KEY):
+                self.assertEqual(update.offer_from(release), {})

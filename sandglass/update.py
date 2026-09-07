@@ -42,6 +42,13 @@ MAX_FEED_BYTES = 1 << 20
 MAX_INSTALLER_BYTES = 200 << 20
 INSTALLER_SUFFIX = "-windows-x64-setup.exe"
 CHECKSUMS_NAME = "SHA256SUMS.windows"
+CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.windows.sig"
+
+# P-256 X||Y, hex, from the Owner's release key. The private half is not in
+# this repository and never will be. Empty until the first key is published:
+# with no key there is nothing to check a manifest against, so a release must
+# then carry an Authenticode signature Windows trusts, exactly as before.
+RELEASE_PUBLIC_KEY = "21D35013DCA960BAE23B6A0C7CF08A79C888A45C0375F67A01D4FABA8E1A4B1E853FAA6A9C09D380272A2980AF44914CE109E07446A734BD7F3BC2A14D2D7EBA"
 
 _LOCK = threading.RLock()
 
@@ -109,21 +116,53 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
         # update, it is a download.
         return {}
     try:
-        sums = _get(assets[CHECKSUMS_NAME], MAX_FEED_BYTES).decode("utf-8", "replace")
+        raw_sums = _get(assets[CHECKSUMS_NAME], MAX_FEED_BYTES)
+        sums = raw_sums.decode("utf-8", "replace")
         digest = checksum_for(sums, installer)
         url = _https(assets[installer])
+        manifest_signed = _manifest_signature_ok(raw_sums, assets)
     except (urllib.error.URLError, OSError, ValueError):
         return {}
     if not digest:
+        return {}
+    if RELEASE_PUBLIC_KEY and not manifest_signed:
+        # A key is published, so every release is expected to carry a manifest
+        # signed with it. One that does not is either older than the key or not
+        # ours; either way it is not something to offer.
         return {}
     return {
         "version": version,
         "asset": installer,
         "url": url,
         "sha256": digest,
+        "manifest_signed": manifest_signed,
         "published_at": str(release.get("published_at") or ""),
         "notes_url": str(release.get("html_url") or ""),
     }
+
+
+def _manifest_signature_ok(raw_sums: bytes, assets: dict[str, str]) -> bool:
+    """Whether the checksum manifest carries this project's own signature.
+
+    The manifest names the installer's digest, so a signature over the manifest
+    covers the installer without a second file to fetch per artifact.
+    """
+    from sandglass.release_signature import verify_release_signature
+
+    if not RELEASE_PUBLIC_KEY or CHECKSUMS_SIGNATURE_NAME not in assets:
+        return False
+    try:
+        signature = _get(assets[CHECKSUMS_SIGNATURE_NAME], MAX_FEED_BYTES)
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return verify_release_signature(raw_sums, bytes.fromhex(
+        signature.decode("ascii", "ignore").strip()
+    ) if _is_hex(signature) else signature, RELEASE_PUBLIC_KEY)
+
+
+def _is_hex(payload: bytes) -> bool:
+    text = payload.decode("ascii", "ignore").strip()
+    return bool(text) and len(text) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in text)
 
 
 def _read_state() -> dict[str, Any]:
@@ -280,9 +319,19 @@ def download_verified(offer: dict[str, Any], into: Path) -> Path:
     if digest.hexdigest() != expected:
         into.unlink(missing_ok=True)
         raise ValueError("installer does not match the published checksum")
-    if not authenticode_valid(into):
+    # Two independent proofs that these bytes are ours, and either is enough.
+    # Authenticode says Windows trusts the publisher; the manifest signature
+    # says the key that signed every previous release signed this digest too.
+    # Requiring only the first meant no release could be offered at all until a
+    # certificate existed, which made the update path hostage to a question it
+    # does not need answered. Requiring neither would leave the channel open to
+    # anyone who can serve a download.
+    if not (offer.get("manifest_signed") or authenticode_valid(into)):
         into.unlink(missing_ok=True)
-        raise ValueError("installer is not signed by a publisher Windows trusts")
+        raise ValueError(
+            "installer carries neither a trusted Authenticode signature nor a "
+            "release manifest signed with this project's key"
+        )
     return into
 
 

@@ -35,6 +35,12 @@ Sandglass 公众版不读取 `~/.codex/accounts/registry.json`、社区 `grok-ap
 | 官方本机登录资料能够证明的账号与身份变化 | 未登录、仅存在云端或未在本机留下官方资料的账号 |
 | 厂商账号级官方余量和重置时间；其中可能包含其他设备 | 默认未接入的第三方工具、纯网页聊天或需要解密进程流量才能观察的活动 |
 | 用户显式接入的本机来源；Sandglass 会原样收下并标出认识与不认识的字段 | 用户来源没有直接提供的事实；Sandglass 不会用现有三家模型替用户裁决未知数据 |
+| 官方客户端在本机记下的那些调用 | **官方客户端没有记下的那些**：厂商完成了一次调用却没有写进本机会话文件时，这台电脑上没有任何东西证明它发生过 |
+
+最后一行不是假设。2026-09-07 在这台机器上量到过一次：厂商自己的 OTLP 事件流里有一次
+已完成的调用，而同一个会话的本机记录文件里没有它的任何痕迹——不是记到了别的时间，是根本
+不存在。**所以本机总量的下界是可信的，上界不是。** 这也是 Sandglass 支持接收官方 OTLP
+的原因之一：它是本机唯一能看见这种遗漏的旁证。
 
 Sandglass 是本机观测仪表盘，不是计费、成本核算或发票对账工具。
 
@@ -206,20 +212,31 @@ CycloneDX runtime SBOM，并统一写入 `SHA256SUMS.windows`。未通过所有�
 
 修改解析逻辑时必须同步提升 `sandglass.models.RECORD_FORMAT`，避免旧缓存继续返回旧语义。
 
-## Code signing policy
+## Code signing and update integrity
 
-Free code signing provided by [SignPath.io](https://signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/).
+**Windows release binaries are not Authenticode-signed yet.** Installing one
+shows an unknown-publisher warning, and Smart App Control may refuse it
+outright. That is the honest state; nothing here claims otherwise.
+
+What is protected today is the update path. Every release publishes
+`SHA256SUMS.windows` alongside the installer, and the manifest carries an
+ECDSA P-256 signature made with a key the maintainer holds offline. An
+installed copy accepts an update only when the download matches the manifest
+and the manifest carries either that signature or an Authenticode signature
+Windows trusts. Verification uses Windows CNG; there is no additional
+dependency and no hand-written cryptography. The private key is never in this
+repository and never on a CI runner, so publishing a release is an act a person
+performs.
 
 - Authors, committers and reviewers: [taiyun668](https://github.com/taiyun668)
-- Signing approver: [taiyun668](https://github.com/taiyun668)
+- Release signing approver: [taiyun668](https://github.com/taiyun668)
 - Privacy policy: [`PRIVACY.md`](PRIVACY.md)
 
-Windows release binaries are built from this repository's public `main` branch
-on GitHub-hosted Actions runners. Each release signing request requires manual
-approval. Sandglass signs only project-maintained binaries that are produced by
-that build; valid signatures on bundled upstream components are preserved. The
-complete build and signing sequence is documented in
+Windows binaries are built from this repository's public `main` branch on
+GitHub-hosted Actions runners. Where a bundled upstream component already
+carries a valid Microsoft or PSF signature, that signature is preserved rather
+than replaced. The build and signing sequence, including the Authenticode path
+that becomes available once a certificate exists, is documented in
 [`docs/signing-workflow.md`](docs/signing-workflow.md).
 
 ## 许可证

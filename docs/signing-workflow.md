@@ -1,11 +1,22 @@
 # Windows signing workflow
 
-Status: GitHub origin is public (`taiyun668/Sandglass`). Inner and outer
-SignPath artifact configurations live in
+Status: GitHub origin is public (`taiyun668/Sandglass`). **There is no
+certificate, no SignPath account and no signing request.** Releases are
+unsigned, and the README says so where users read it -- an attribution line
+naming a sponsor is added if and when that sponsor exists, never before.
+
+Releases are not blocked on that. The update path is protected by a signature
+over `SHA256SUMS.windows` made with the maintainer's own ECDSA P-256 key
+(`tools/sign_release_manifest.ps1`, verified through Windows CNG by
+`sandglass/release_signature.py`), and `download_verified()` accepts either
+that or Authenticode. Signing remains the destination -- it is what a
+first-time installer sees -- but it is no longer on the critical path, and the
+sequence below is what happens once a certificate exists.
+
+Inner and outer SignPath artifact configurations live in
 `.signpath/artifact-configurations/`. CI prepares the inner payload on
 GitHub-hosted `windows-latest` and submits only when
-`SIGNPATH_ORGANIZATION_ID` and `SIGNPATH_API_TOKEN` are set. No SignPath
-account, token or request exists yet.
+`SIGNPATH_ORGANIZATION_ID` and `SIGNPATH_API_TOKEN` are set.
 
 ## Why the workflow has two signing requests
 
