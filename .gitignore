@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+native/SandglassShell/bin/
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.sandglass/
+tools/__pycache__/

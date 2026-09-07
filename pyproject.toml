@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandglass"
+version = "0.1.0"
+description = "This-machine usage meter for Codex, Claude, and Grok"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ayun" }]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "opentelemetry-proto>=1.44,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/taiyun668/Sandglass"
+Issues = "https://github.com/taiyun668/Sandglass/issues"
+
+# OTLP protobuf types come from the official OpenTelemetry package instead of a
+# hand-written wire decoder. Only the desktop shell needs the dependencies below.
+[project.optional-dependencies]
+desktop = [
+    "pythonnet>=3,<4; sys_platform == 'win32'",
+    "pywebview>=5; sys_platform == 'win32'",
+    "pystray>=0.19; sys_platform == 'win32'",
+    "pillow>=10; sys_platform == 'win32'",
+]
+
+[project.scripts]
+sandglass = "sandglass.cli:main"
+
+[project.gui-scripts]
+sandglass-desktop = "sandglass.desktop:main"
+
+[tool.setuptools.packages.find]
+include = ["sandglass*"]
+
+[tool.setuptools.package-data]
+sandglass = ["web/*", "web/**/*"]

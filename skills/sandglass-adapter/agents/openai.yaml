@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sandglass Adapter"
+  short_description: "Validate and connect local usage evidence"
+  default_prompt: "Execute $sandglass-adapter: ask for this computer's current tool inventory, reconstruct every in-scope provider ledger, and persist the reversible evidence in Sandglass without changing provider-owned data."

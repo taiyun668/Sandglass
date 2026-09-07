@@ -1,0 +1,18 @@
+# Bytes that are audited must survive checkout unchanged.
+#
+# `docs/release-provenance-audit.md` records a sha256 for each upstream file
+# below, and tests/test_release.py pins the same digests. Those digests are of
+# the bytes git stores. With no attribute set, a checkout on Windows applies
+# core.autocrlf -- git-for-windows sets it to true by default, and it is set in
+# this repository -- and rewrites every LF in a text file to CRLF.
+#
+# Measured 2026-09-06 with `git worktree add` from this repository:
+# LICENSE-Geist.txt came out 4475 bytes against the audited 4383, and
+# proxy_tools-LICENSE.txt likewise. Both release tests failed. They pass in the
+# working tree only because its copies predate that conversion, so a fresh
+# clone -- a new contributor, a build machine -- would have shipped licence
+# bytes that are not the bytes anybody reviewed, and said so in a provenance
+# record that was no longer true.
+sandglass/web/fonts/LICENSE-Geist.txt -text
+packaging/licenses/proxy_tools-LICENSE.txt -text
+sandglass/web/fonts/Geist-Variable.woff2 binary

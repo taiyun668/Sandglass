@@ -1,0 +1,3962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" id="meta-description" content="本机 Claude、Codex、Grok 额度与用量。" />
+  <meta name="color-scheme" content="light dark" />
+  <title>sandglass</title>
+  <link rel="icon" href="favicon.png" type="image/png" />
+  <style>
+    /* CodexBar menu card, static polish via redesign-existing-projects */
+    @font-face {
+      font-family: Geist;
+      src: url("fonts/Geist-Variable.woff2") format("woff2");
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+    :root {
+      --bg: #f6f3ec;
+      --text: #1c1b19;
+      --muted: #6b6964;
+      --faint: #706d67;
+      --ink: var(--text);
+      --card: #ffffff;
+      --line: rgba(28, 27, 25, .08);
+      --track: rgba(28, 27, 25, .08);
+      --hover: rgba(28, 27, 25, .045);
+      --sel: #007aff;
+      --claude: #c96442;
+      --codex: #0f766e;
+      --grok: #111111;
+      --hot: #c4473d;
+      --fresh: #2f8f4e;
+      --card-w: 380px;
+      --pad-x: 20px;
+      --ease: cubic-bezier(.22, 1, .36, 1);
+      --shadow: 48, 40, 28;
+      --z-skip: 10;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1a1917;
+        --text: #f5f3ee;
+        --muted: #a39e96;
+        --faint: #969189;
+        --card: #2a2926;
+        --line: rgba(255, 248, 238, .10);
+        --track: rgba(255, 248, 238, .12);
+        --hover: rgba(255, 248, 238, .06);
+        --sel: #0a84ff;
+        --claude: #d98968;
+        --codex: #3ec5b6;
+        --grok: #f5f3ee;
+        --hot: #d45b54;
+        --fresh: #4cc27a;
+        --shadow: 0, 0, 0;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100dvh; }
+    html { color-scheme: light dark; }
+    html, body { scrollbar-width: none; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+    html.overview-mode,
+    html.overview-mode body {
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+    body {
+      font-family: Geist, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    .skip {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      z-index: var(--z-skip);
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--text);
+      color: var(--bg);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      transform: translateY(-160%);
+    }
+    .skip:focus { transform: none; }
+    .popover {
+      position: relative;
+      width: min(var(--card-w), calc(100% - 24px));
+      margin: 32px auto 64px;
+      padding-top: 32px;
+      background: var(--card);
+      border-radius: 16px;
+      box-shadow:
+        0 10px 36px rgba(var(--shadow), .10),
+        0 0 0 0.5px rgba(var(--shadow), .06);
+      overflow: hidden;
+    }
+    html.overview-mode .popover {
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100dvh - 96px);
+    }
+    html.overview-mode .body {
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .body.tab-enter,
+    .menu.tab-enter {
+      animation: tab-enter .18s var(--ease) both;
+    }
+    @keyframes tab-enter {
+      from { opacity: .58; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .tabs {
+      display: flex;
+      align-items: stretch;
+      gap: 2px;
+      padding: 8px 10px 7px;
+      border-bottom: 0.5px solid var(--line);
+    }
+    .app-menu-shell {
+      position: absolute;
+      z-index: 20;
+      top: 0;
+      left: 10px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+    }
+    .app-menu-button {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      appearance: none;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: background .18s var(--ease), color .18s var(--ease);
+    }
+    .app-menu-button:hover,
+    .app-menu-button[aria-expanded="true"] {
+      background: var(--hover);
+      color: var(--text);
+    }
+    .app-menu-button svg { width: 18px; height: 18px; display: block; }
+    .app-menu-panel {
+      position: absolute;
+      top: 32px;
+      left: 0;
+      width: 224px;
+      padding: 7px;
+      border: .5px solid var(--line);
+      border-radius: 12px;
+      background: var(--card);
+      box-shadow: 0 12px 30px rgba(var(--shadow), .18);
+    }
+    .app-menu-title {
+      padding: 5px 8px 6px;
+      color: var(--faint);
+      font-size: 11px;
+      line-height: 14px;
+      font-weight: 700;
+      letter-spacing: .03em;
+    }
+    .app-menu-item,
+    .language-option {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      padding: 7px 8px;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      line-height: 18px;
+      text-align: left;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .app-menu-item:hover,
+    .language-option:hover { background: var(--hover); }
+    .app-menu-item .menu-value {
+      min-width: 0;
+      margin-left: auto;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .app-menu-item .menu-chevron {
+      width: 12px;
+      height: 12px;
+      flex: 0 0 12px;
+      color: var(--faint);
+      transition: transform .16s var(--ease);
+    }
+    .app-menu-item[aria-expanded="true"] .menu-chevron { transform: rotate(180deg); }
+    .app-menu-item svg {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 14px;
+    }
+    .app-menu-divider {
+      height: .5px;
+      margin: 6px 4px 3px;
+      background: var(--line);
+    }
+    .app-menu-options {
+      margin: 2px 0 2px 8px;
+      padding-left: 4px;
+      border-left: 2px solid var(--line);
+      max-height: 252px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .app-menu-options::-webkit-scrollbar {
+      display: none;
+    }
+    .language-option .check {
+      width: 14px;
+      flex: 0 0 14px;
+      color: var(--sel);
+      font-weight: 800;
+      text-align: center;
+    }
+    .help-view {
+      position: relative;
+      isolation: isolate;
+      min-height: 420px;
+      padding: 2px 0 10px;
+    }
+    .help-view:focus { outline: none; }
+    .help-view::before {
+      content: "";
+      position: absolute;
+      z-index: -2;
+      inset: -42px -58px -28px;
+      background:
+        radial-gradient(180px 150px at 8% 20%, color-mix(in srgb, var(--codex) 14%, transparent), transparent 74%),
+        radial-gradient(220px 170px at 94% 84%, color-mix(in srgb, var(--sel) 10%, transparent), transparent 78%);
+      filter: blur(26px) saturate(1.08);
+      opacity: .62;
+      pointer-events: none;
+      animation: help-aurora 12s ease-in-out infinite alternate;
+    }
+    .help-view::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: 42px -12px 0;
+      border-radius: 30px;
+      background: linear-gradient(145deg, rgba(255,255,255,.12), transparent 46%, rgba(255,255,255,.05));
+      pointer-events: none;
+    }
+    @keyframes help-aurora {
+      from { transform: translate3d(-5px, -3px, 0) scale(1); }
+      to { transform: translate3d(7px, 5px, 0) scale(1.035); }
+    }
+    .help-view .head {
+      position: relative;
+      z-index: 1;
+      margin-bottom: 14px;
+    }
+    .help-view .head h1 { flex-wrap: nowrap; }
+    .help-view .head .logo {
+      flex: 0 0 30px;
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+    }
+    .help-view .head h1 .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .help-sections {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      overflow: hidden;
+      padding: 3px 13px;
+      border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+      border-radius: 18px;
+      background: linear-gradient(145deg,
+        color-mix(in srgb, var(--card) 62%, transparent),
+        color-mix(in srgb, var(--card) 38%, transparent));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.58), 0 16px 36px -28px rgba(var(--shadow), .5);
+      -webkit-backdrop-filter: blur(22px) saturate(1.24);
+      backdrop-filter: blur(22px) saturate(1.24);
+    }
+    .help-section {
+      position: relative;
+      padding: 12px 2px;
+      border: 0;
+      background: transparent;
+      transition: background .18s var(--ease);
+    }
+    .help-section + .help-section::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: color-mix(in srgb, var(--text) 7%, transparent);
+    }
+    .help-section:hover {
+      background: color-mix(in srgb, var(--text) 2.5%, transparent);
+    }
+    .help-section h2 {
+      position: relative;
+      margin: 0 0 3px;
+      font-size: 13px;
+      line-height: 17px;
+      font-weight: 700;
+    }
+    .help-section p {
+      position: relative;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 18px;
+      overflow-wrap: anywhere;
+    }
+    .help-advanced {
+      position: relative;
+      z-index: 1;
+      margin-top: 12px;
+      padding: 10px;
+      border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+      border-radius: 15px;
+      background: linear-gradient(145deg,
+        color-mix(in srgb, var(--card) 64%, transparent),
+        color-mix(in srgb, var(--card) 38%, transparent));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.56), 0 10px 26px -22px rgba(var(--shadow), .48);
+      -webkit-backdrop-filter: blur(20px) saturate(1.3);
+      backdrop-filter: blur(20px) saturate(1.3);
+      transition: border-color .2s var(--ease), box-shadow .2s var(--ease), background .2s var(--ease);
+    }
+    .help-advanced.open {
+      border-color: color-mix(in srgb, var(--text) 14%, transparent);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.65), 0 16px 36px -26px rgba(var(--shadow), .58);
+    }
+    .help-advanced-toggle {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      margin: 0;
+      padding: 10px 34px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 16px;
+      line-height: 22px;
+      font-weight: 700;
+      text-align: center;
+      cursor: pointer;
+    }
+    .help-advanced-toggle:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--sel) 58%, transparent);
+      outline-offset: -1px;
+    }
+    .help-advanced-toggle::after {
+      content: "";
+      position: absolute;
+      right: 15px;
+      width: 5px;
+      height: 5px;
+      margin-top: -1px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: rotate(45deg);
+    }
+    .help-advanced-toggle[aria-expanded="true"]::after {
+      margin-top: 2px;
+      transform: rotate(-135deg);
+    }
+    .help-advanced-body {
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      margin-top: 6px;
+      padding: 14px 12px 10px;
+      border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+      text-align: center;
+    }
+    .help-advanced-body p {
+      margin: 0;
+      max-width: 100%;
+      justify-self: stretch;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 19px;
+      overflow-wrap: anywhere;
+    }
+    .help-advanced-body p.help-advanced-next {
+      color: var(--faint);
+      font-size: 12px;
+      line-height: 18px;
+      text-decoration: none;
+    }
+    .help-advanced-body .help-action { margin-top: 0; }
+    .help-action {
+      min-width: 152px;
+      margin-top: 0;
+      padding: 10px 22px;
+      border: 0;
+      border-radius: 8px;
+      background: linear-gradient(135deg,
+        color-mix(in srgb, var(--codex) 90%, white 10%),
+        color-mix(in srgb, var(--codex) 72%, var(--sel) 28%));
+      color: white;
+      font: inherit;
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 8px 16px -10px color-mix(in srgb, var(--codex) 74%, transparent);
+      transition: filter 120ms var(--ease), transform 120ms var(--ease), box-shadow 120ms var(--ease);
+    }
+    .help-action:hover { filter: brightness(1.06); transform: translateY(-1px); }
+    .help-action:active { filter: brightness(.92); transform: translateY(0) scale(.985); }
+    .help-action.is-copied,
+    .help-action.is-copied:hover { filter: brightness(1.14); }
+    .help-action:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .tabs button {
+      flex: 1 1 0;
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 7px 4px 5px;
+      border-radius: 10px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: .01em;
+      line-height: 13px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      min-width: 0;
+      transition: background .22s var(--ease), color .22s var(--ease), transform .18s var(--ease), box-shadow .22s var(--ease);
+    }
+    .tabs button:not(.on):hover { background: var(--hover); color: var(--text); }
+    .tabs button:active { transform: scale(.98); }
+    .tabs button svg { width: 30px; height: 30px; display: block; }
+    .tab-label {
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .logo {
+      width: 30px;
+      height: 30px;
+      display: block;
+      flex: 0 0 auto;
+      background: center / contain no-repeat;
+    }
+    .logo.codex {
+      background-image: url("icons/ProviderIcon-codex.png");
+    }
+    .logo.claude {
+      background-image: url("icons/ProviderIcon-claude.png");
+    }
+    .logo.grok {
+      background-image: url("icons/ProviderIcon-grok.png");
+    }
+    .logo.sandglass {
+      background-image: url("assets/logo-mark.png");
+    }
+    @media (prefers-color-scheme: dark) {
+      .logo.grok { filter: invert(1); }
+    }
+    .tabs button.on .logo { filter: brightness(0) invert(1); }
+    .tabs .mark {
+      width: 18px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--track);
+      overflow: hidden;
+      margin-top: 1px;
+    }
+    .tabs .mark.claude { background: color-mix(in srgb, var(--claude) 28%, var(--card)); }
+    .tabs .mark.codex { background: color-mix(in srgb, var(--codex) 28%, var(--card)); }
+    .tabs .mark.grok { background: color-mix(in srgb, var(--grok) 14%, var(--card)); }
+    .tabs .mark i {
+      display: block;
+      width: 100%;
+      height: 2px;
+      border-radius: 2px;
+      transform: scaleX(var(--fill, 0));
+      transform-origin: left center;
+    }
+    .tabs button.on {
+      background: var(--sel);
+      color: #fff;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.28),
+        0 6px 14px -6px rgba(0, 122, 255, .38);
+    }
+    .tabs button.on .mark { visibility: hidden; }
+
+    .body { padding: 14px var(--pad-x) 16px; }
+    .head .row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .head .row + .row { margin-top: 3px; align-items: baseline; }
+    .head h1 {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1 1 auto;
+      font-size: 22px;
+      line-height: 26px;
+      font-weight: 650;
+      letter-spacing: -0.04em;
+    }
+    .head .logo {
+      width: 30px;
+      height: 30px;
+      color: var(--text);
+    }
+    .head h1 .name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .head .email,
+    .head .sub,
+    .head .plan {
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 500;
+      letter-spacing: .01em;
+      color: var(--muted);
+    }
+    .head .email {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 52%;
+    }
+    .head .sub {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .head .sub.err { color: var(--hot); }
+    .head .plan { white-space: nowrap; }
+    .head .jump {
+      appearance: none; border: 0; background: none; font: inherit;
+      width: 100%; text-align: left; cursor: pointer; padding: 0; color: inherit;
+    }
+    .head .jump[disabled] { cursor: default; }
+
+    .rule {
+      height: 0.5px;
+      background: var(--line);
+      margin: 10px 0 14px;
+    }
+    .rule.mid { margin: 14px 0 16px; }
+
+    .stack { display: flex; flex-direction: column; gap: 16px; }
+
+    .meter { display: flex; flex-direction: column; gap: 6px; }
+    .meter-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      row-gap: 2px;
+      gap: 12px;
+    }
+    .meter-name {
+      margin: 0;
+      min-width: 0;
+      font-size: 17px;
+      line-height: 22px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+    }
+    .meter-local {
+      flex: 1 1 180px;
+      min-width: 0;
+      margin: 0;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 500;
+      letter-spacing: .005em;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+      text-align: right;
+    }
+    .local-sync {
+      display: flex;
+      min-height: 34px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 2px;
+      padding: 7px 9px;
+      border: .5px solid var(--line);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--hover) 76%, var(--card));
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 550;
+    }
+    .local-sync.is-error {
+      border-color: color-mix(in srgb, var(--hot) 24%, var(--line));
+      background: color-mix(in srgb, var(--hot) 6%, var(--card));
+      color: var(--text);
+    }
+    .local-sync button {
+      flex: 0 0 auto;
+      min-height: 28px;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 4px 10px;
+      background: var(--text);
+      color: var(--card);
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .local-sync button:disabled { cursor: wait; opacity: .62; }
+    .bar {
+      position: relative;
+      height: 6px;
+      border-radius: 99px;
+      background: var(--track);
+      overflow: hidden;
+    }
+    .bar.claude { background: color-mix(in srgb, var(--claude) 28%, var(--card)); }
+    .bar.codex { background: color-mix(in srgb, var(--codex) 28%, var(--card)); }
+    .bar.grok { background: color-mix(in srgb, var(--grok) 14%, var(--card)); }
+    .bar .fill {
+      display: block;
+      width: 100%;
+      height: 6px;
+      border-radius: 99px;
+      transform: scaleX(var(--fill, 0));
+      transform-origin: left center;
+    }
+    .bar.codex .fill { background: var(--codex); }
+    .bar.claude .fill { background: var(--claude); }
+    .bar.grok .fill { background: var(--grok); }
+    .meter-bot {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    .meter-pct, .meter-reset {
+      appearance: none; border: 0; background: none; font: inherit;
+      cursor: pointer; padding: 0; color: var(--muted);
+      min-height: 24px;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 18px;
+      letter-spacing: .005em;
+      transition: color .2s var(--ease);
+    }
+    .meter-pct {
+      flex: 0 0 auto;
+      text-align: left;
+      font-variant-numeric: tabular-nums;
+    }
+    .meter.is-empty .bar { opacity: .4; }
+    .meter.is-empty .meter-pct {
+      cursor: default;
+      color: var(--faint);
+    }
+    .meter-pct:hover, .meter-reset:hover { color: var(--text); }
+    .meter.is-empty .meter-pct:hover { color: var(--faint); }
+    .meter-reset {
+      min-width: 0;
+      margin-left: auto;
+      text-align: right;
+      white-space: normal;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .cost { display: flex; flex-direction: column; gap: 10px; }
+    .activity-stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 0.5px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .activity-stat {
+      position: relative;
+      min-width: 0;
+      padding: 9px 5px 8px;
+      text-align: center;
+    }
+    .activity-stat + .activity-stat::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 9px;
+      bottom: 9px;
+      width: 0.5px;
+      background: var(--line);
+    }
+    .activity-stat b {
+      display: block;
+      overflow: hidden;
+      font-size: 14px;
+      line-height: 18px;
+      font-weight: 650;
+      letter-spacing: -0.025em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .activity-stat span {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      margin-top: 1px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 500;
+      white-space: normal;
+      text-wrap: balance;
+      overflow-wrap: anywhere;
+    }
+    .heat-head {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .activity-range {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 2px;
+      margin-bottom: 7px;
+    }
+    .activity-range button {
+      border: 0;
+      border-radius: 7px;
+      padding: 3px 7px;
+      min-height: 24px;
+      background: transparent;
+      color: var(--faint);
+      font: inherit;
+      font-size: 11px;
+      line-height: 16px;
+      cursor: pointer;
+    }
+    .activity-range button.on {
+      background: var(--track);
+      color: var(--text);
+      font-weight: 650;
+    }
+    .heatmap {
+      --heat: var(--text);
+      overflow: visible;
+    }
+    .heatmap.codex { --heat: var(--codex); }
+    .heatmap.claude { --heat: var(--claude); }
+    .heatmap.grok { --heat: var(--grok); }
+    .week-heat {
+      --heat-cell-size: 14px;
+      --heat-column-count: 18;
+      --heat-gap: 3px;
+      display: grid;
+      grid-template-columns: repeat(var(--heat-column-count), var(--heat-cell-size));
+      grid-auto-flow: row;
+      justify-content: space-between;
+      gap: var(--heat-gap);
+      width: 100%;
+      margin: 8px 0 0;
+      overflow: visible;
+    }
+    .week-heat.range-30 {
+      --heat-cell-size: 24px;
+      --heat-column-count: 10;
+      --heat-gap: 5px;
+    }
+    .week-heat.range-7 {
+      --heat-cell-size: 32px;
+      --heat-column-count: 7;
+      --heat-gap: 8px;
+    }
+    .heat-cell {
+      position: relative;
+      z-index: 0;
+      width: var(--heat-cell-size);
+      height: var(--heat-cell-size);
+      border: 0;
+      border-radius: 3px;
+      outline: 0;
+      background: var(--track);
+      cursor: default;
+      transform-origin: center;
+      animation: heat-cell-in .34s var(--ease) both;
+      animation-delay: var(--delay, 0ms);
+      transition:
+        background-color .18s var(--ease),
+        filter .18s var(--ease),
+        opacity .2s var(--ease),
+        transform .2s var(--ease);
+    }
+    .heat-cell.used {
+      background: var(--heat);
+      opacity: var(--alpha, .18);
+    }
+    .heat-cell:hover {
+      z-index: 5;
+      filter: brightness(.92);
+      transform: translateY(-2px) scale(1.12);
+    }
+    .heat-cell.used:hover { opacity: 1; }
+    .heat-cell::after {
+      content: attr(data-tip);
+      position: absolute;
+      z-index: 20;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      width: max-content;
+      max-width: min(280px, calc(100vw - 40px));
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 13px;
+      background: #1c1c1e;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
+      color: #fff;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 600;
+      letter-spacing: -.01em;
+      white-space: normal;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(-50%, 4px) scale(.96);
+      transform-origin: 50% 100%;
+      transition: opacity .14s ease-out, transform .18s var(--ease);
+    }
+    .heat-cell:hover::after {
+      opacity: 1;
+      transform: translate(-50%, 0) scale(1);
+    }
+    .heat-cell.tip-left::after {
+      left: 0;
+      transform: translate(0, 4px) scale(.96);
+      transform-origin: 0 100%;
+    }
+    .heat-cell.tip-left:hover::after { transform: translate(0, 0) scale(1); }
+    .heat-cell.tip-right::after {
+      right: 0;
+      left: auto;
+      transform: translate(0, 4px) scale(.96);
+      transform-origin: 100% 100%;
+    }
+    .heat-cell.tip-right:hover::after { transform: translate(0, 0) scale(1); }
+    .heat-axis {
+      display: flex;
+      justify-content: flex-end;
+      width: 100%;
+      margin: 6px 0 0;
+      color: var(--faint);
+      font-size: 10px;
+      line-height: 13px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    @keyframes heat-cell-in {
+      from { opacity: 0; transform: translateY(3px) scale(.82); }
+    }
+    .cost-span {
+      margin-left: auto;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 500;
+      letter-spacing: 0;
+      color: var(--faint);
+      white-space: nowrap;
+    }
+    .cost-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 17px;
+      line-height: 22px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+    }
+    .cost p {
+      margin: 0;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .cost .hint { color: var(--muted); white-space: normal; font-size: 12px; letter-spacing: .01em; font-weight: 450; }
+    .history-help {
+      position: relative;
+      display: inline-flex;
+      width: fit-content;
+      max-width: 100%;
+      margin-top: 8px;
+    }
+    .history-label {
+      display: inline-flex;
+      min-width: 0;
+      min-height: 24px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 600;
+      cursor: help;
+      overflow-wrap: anywhere;
+    }
+    .history-label:hover { color: var(--ink); }
+    .history-label:focus-visible {
+      color: var(--ink);
+      outline: 2px solid var(--sel);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+    .history-note {
+      position: absolute;
+      z-index: 8;
+      top: calc(100% + 6px);
+      left: 0;
+      width: 292px;
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--card);
+      box-shadow: 0 8px 26px rgba(var(--shadow), .14), 0 0 0 .5px rgba(var(--shadow), .10);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 480;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-3px);
+      pointer-events: none;
+      transition: opacity .16s var(--ease), transform .16s var(--ease), visibility .16s;
+    }
+    .history-help:hover .history-note,
+    .history-help:focus-within .history-note {
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+    }
+    .telemetry-help {
+      --telemetry: var(--faint);
+      display: flex;
+      width: 100%;
+      max-width: 100%;
+      align-items: center;
+      gap: 8px;
+    }
+    .telemetry-help.open {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+    .telemetry-help.identity_observed.claude { --telemetry: var(--claude); }
+    .telemetry-help.identity_observed.codex { --telemetry: var(--codex); }
+    .telemetry-help.identity_observed.grok { --telemetry: var(--grok); }
+    .telemetry-help.usage_only { --telemetry: #c98b32; }
+    .telemetry-help.traffic_only { --telemetry: #2f80c9; }
+    .telemetry-help .history-label {
+      display: inline-flex;
+      flex: 1 1 auto;
+      min-width: 0;
+      align-items: center;
+      gap: 6px;
+    }
+    .telemetry-status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+    }
+    .telemetry-enable {
+      flex: 0 0 auto;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--sel);
+      color: #fff;
+      font: inherit;
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(0, 122, 255, .22);
+      transition: filter .16s var(--ease), transform .16s var(--ease), opacity .16s var(--ease);
+    }
+    .telemetry-enable:hover { filter: brightness(1.06); transform: translateY(-1px); }
+    .telemetry-enable:active { filter: brightness(.94); transform: translateY(0); }
+    .telemetry-enable:disabled { cursor: wait; opacity: .68; transform: none; }
+    .telemetry-trigger {
+      appearance: none;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      font: inherit;
+      text-align: left;
+    }
+    .telemetry-help.open .history-note { display: none; }
+    .telemetry-dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--telemetry);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--telemetry) 13%, transparent);
+    }
+    .telemetry-setup {
+      width: 100%;
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 12px;
+      background: var(--hover);
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 16px;
+    }
+    .telemetry-setup-title {
+      margin: 0 0 4px;
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 700;
+    }
+    .telemetry-setup p { margin: 0; }
+    .telemetry-command {
+      display: block;
+      margin: 8px 0;
+      padding: 8px;
+      border-radius: 9px;
+      background: var(--card);
+      color: var(--ink);
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 10px;
+      line-height: 15px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      user-select: text;
+    }
+    .telemetry-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .telemetry-actions button {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 5px 8px;
+      background: var(--card);
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .overview-head {
+      position: relative;
+      display: flex;
+      flex: 0 0 auto;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .overview-head h1 {
+      min-width: 0;
+      margin: 0;
+      font-size: 16px;
+      line-height: 24px;
+      font-weight: 700;
+      letter-spacing: -.02em;
+    }
+    .overview-add {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 5px 8px;
+      background: var(--hover);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .overview-actions {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    .overview-actions button { white-space: nowrap; }
+    .overview-mode-toggle {
+      position: relative;
+      isolation: isolate;
+      display: inline-flex;
+      align-items: center;
+      width: 168px;
+      height: 38px;
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 4px;
+      background: var(--track);
+      color: var(--muted);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 76%, transparent);
+      cursor: pointer;
+      overflow: hidden;
+      transition: background .2s var(--ease), box-shadow .2s var(--ease);
+    }
+    .overview-mode-toggle:hover {
+      background: color-mix(in srgb, var(--track) 88%, var(--card));
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 92%, transparent);
+    }
+    .overview-mode-toggle::before {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: 4px auto 4px 4px;
+      width: calc(50% - 4px);
+      border-radius: 999px;
+      background: var(--card);
+      box-shadow: 0 1px 3px rgba(var(--shadow), .14);
+      transition: transform .2s var(--ease);
+    }
+    .overview-mode-toggle[data-current="custom"]::before { transform: translateX(100%); }
+    .overview-mode-toggle .mode-option {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex: 1 1 50%;
+      min-width: 0;
+      align-items: center;
+      justify-content: center;
+      height: 30px;
+      border-radius: 999px;
+      color: inherit;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 620;
+      white-space: nowrap;
+      transition: color .2s var(--ease);
+    }
+    .overview-mode-toggle .mode-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .overview-mode-toggle[data-current="default"] .mode-option:first-child,
+    .overview-mode-toggle[data-current="custom"] .mode-option:last-child { color: var(--text); }
+    .overview-rescan {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 5px 8px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .overview-rescan:hover { color: var(--text); background: var(--hover); }
+    .overview-rescan[disabled] { cursor: default; opacity: .6; }
+    .overview-notice {
+      flex: 0 0 100%;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 16px;
+      text-align: right;
+      animation: notice-life 4s linear both;
+    }
+    @keyframes notice-life { 0%, 82% { opacity: 1; } 100% { opacity: 0; } }
+    .overview-picker {
+      position: relative;
+      z-index: 5;
+      flex: 0 0 100%;
+      top: auto;
+      right: auto;
+      width: 100%;
+      margin-top: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      box-sizing: border-box;
+      padding: 6px;
+      border: 0.5px solid var(--line);
+      border-radius: 12px;
+      background: var(--card);
+      box-shadow: 0 12px 32px rgba(var(--shadow), .16);
+      scrollbar-width: none;
+    }
+    .overview-provider-group { --provider: var(--text); }
+    .overview-provider-group.codex { --provider: var(--codex); }
+    .overview-provider-group.claude { --provider: var(--claude); }
+    .overview-provider-group.grok { --provider: var(--grok); }
+    .overview-provider-group + .overview-provider-group {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 0.5px solid var(--line);
+    }
+    .overview-provider-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 4px 6px 5px;
+      color: var(--provider);
+      font-size: 12px;
+      line-height: 16px;
+      font-weight: 750;
+    }
+    .overview-provider-head .logo { width: 18px; height: 18px; }
+    .overview-provider-head .count {
+      margin-left: auto;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .overview-picker button {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 7px 6px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .overview-picker button:hover { background: var(--hover); }
+    .overview-picker button[disabled] { cursor: default; }
+    .overview-picker button[disabled]:hover { background: transparent; }
+    .overview-picker .who {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .overview-account-status {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    .overview-account-status span {
+      border-radius: 99px;
+      padding: 2px 6px;
+      color: var(--muted);
+      background: var(--hover);
+      font-size: 9px;
+      line-height: 13px;
+      font-weight: 650;
+    }
+    .overview-account-status .current { color: var(--provider); }
+    .overview-empty { padding: 22px 4px; color: var(--muted); font-size: 13px; text-align: center; }
+    .overview-onboarding {
+      min-height: 300px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 36px 24px;
+      border: 0.5px solid var(--line);
+      border-radius: 14px;
+      background: var(--hover);
+      text-align: center;
+    }
+    .overview-onboarding .logo { width: 52px; height: 52px; margin-bottom: 4px; }
+    .overview-onboarding h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 24px;
+      font-weight: 700;
+      letter-spacing: -.02em;
+    }
+    .overview-onboarding p {
+      max-width: 310px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 19px;
+    }
+    .overview-onboarding .scan-result { color: var(--text); font-weight: 700; }
+    .overview-primary {
+      appearance: none;
+      border: 0;
+      border-radius: 9px;
+      margin-top: 8px;
+      padding: 9px 16px;
+      background: var(--sel);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .overview-primary[disabled] { cursor: default; opacity: .6; }
+    .onboarding-mode-options {
+      width: min(100%, 330px);
+      display: grid;
+      gap: 9px;
+      margin-top: 8px;
+    }
+    .onboarding-mode {
+      appearance: none;
+      width: 100%;
+      padding: 11px 12px;
+      border: 0.5px solid var(--line);
+      border-radius: 11px;
+      background: var(--card);
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .16s ease, background .16s ease, transform .16s ease;
+    }
+    .onboarding-mode:hover { border-color: var(--sel); background: var(--hover); transform: translateY(-1px); }
+    .onboarding-mode strong { display: block; font-size: 13px; line-height: 18px; }
+    .onboarding-mode span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 16px; }
+    .overview-cards.scroll {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-right: 5px;
+    }
+    .overview-cards { min-height: 0; overflow-y: auto; scrollbar-width: none; }
+    .overview-cards::-webkit-scrollbar { display: none; }
+    .overview-picker::-webkit-scrollbar { display: none; }
+    .ov { position: relative; }
+    .ov + .ov { border-top: 0.5px solid var(--line); margin-top: 10px; padding-top: 14px; }
+    .ov .rule { margin: 8px 0 12px; }
+    .ov .stack { gap: 14px; }
+    .overview-card-actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      height: 20px;
+      margin-bottom: 2px;
+    }
+    .overview-remove {
+      width: 24px;
+      height: 20px;
+      appearance: none;
+      border: 0;
+      border-radius: 7px;
+      padding: 0;
+      background: transparent;
+      color: var(--faint);
+      font: inherit;
+      font-size: 18px;
+      line-height: 20px;
+      cursor: pointer;
+      transition: color .16s ease, background .16s ease;
+    }
+    .overview-remove:hover { color: var(--text); background: var(--hover); }
+
+    .menu { border-top: 0.5px solid var(--line); padding: 6px 0 10px; }
+    .menu button {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      gap: 10px;
+      appearance: none;
+      border: 0;
+      background: none;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 18px;
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 16px;
+      cursor: pointer;
+      text-align: left;
+      transition: background .2s var(--ease), transform .16s var(--ease);
+    }
+    .menu button:hover { background: var(--hover); }
+    .menu button:active { transform: translateY(1px); }
+    .menu .ico {
+      width: 18px; height: 18px; flex: 0 0 18px;
+      color: var(--text);
+    }
+    .menu .ico svg { width: 16px; height: 16px; display: block; margin: 1px auto; }
+    .menu .grow { flex: 1; }
+    .menu .hint { color: var(--faint); font-size: 13px; font-weight: 500; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+    .acc-wrap {
+      border-top: 0.5px solid var(--line);
+      margin-top: 14px;
+      padding-top: 10px;
+    }
+    .account-list-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .disclose {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      appearance: none;
+      border: .5px solid var(--line);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--hover) 72%, var(--card));
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .01em;
+      color: var(--text);
+      padding: 8px 10px;
+      min-height: 36px;
+      cursor: pointer;
+      text-align: left;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .18), 0 1px 2px rgba(var(--shadow), .05);
+      transition: color .2s var(--ease), background .2s var(--ease), border-color .2s var(--ease), box-shadow .2s var(--ease);
+    }
+    .disclose:hover,
+    .disclose[aria-expanded="true"] {
+      background: var(--hover);
+      border-color: color-mix(in srgb, var(--text) 16%, var(--line));
+      color: var(--text);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .22), 0 2px 6px rgba(var(--shadow), .08);
+    }
+    .disclose .n { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 700; }
+    .disclose .disclose-chevron {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 13px;
+      margin-left: 5px;
+      color: var(--muted);
+      transition: transform .16s var(--ease), color .2s var(--ease);
+    }
+    .disclose:hover .disclose-chevron,
+    .disclose[aria-expanded="true"] .disclose-chevron { color: var(--text); }
+    .disclose[aria-expanded="true"] .disclose-chevron { transform: rotate(180deg); }
+    .account-list-dropdown {
+      margin-top: 6px;
+      padding: 8px 0;
+      border: .5px solid var(--line);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--card) 92%, var(--hover));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 4px 12px rgba(var(--shadow), .06);
+      overflow: hidden;
+    }
+    .account-list-dropdown .accs { margin: 0; }
+    .account-list-dropdown.is-opening,
+    .account-list-dropdown.is-closing {
+      transform-origin: top center;
+      will-change: transform, opacity, clip-path;
+    }
+    .account-list-dropdown.is-opening {
+      animation: account-list-dropdown-in .24s var(--ease) both;
+    }
+    .account-list-dropdown.is-closing {
+      animation: account-list-dropdown-out .18s var(--ease) both;
+      pointer-events: none;
+    }
+    @keyframes account-list-dropdown-in {
+      from {
+        opacity: 0;
+        transform: translateY(-6px) scaleY(.96);
+        clip-path: inset(0 0 100% 0 round 10px);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+        clip-path: inset(0 0 0 0 round 10px);
+      }
+    }
+    @keyframes account-list-dropdown-out {
+      from {
+        opacity: 1;
+        transform: none;
+        clip-path: inset(0 0 0 0 round 10px);
+      }
+      to {
+        opacity: 0;
+        transform: translateY(-4px) scaleY(.98);
+        clip-path: inset(0 0 100% 0 round 10px);
+      }
+    }
+    .monitor-add-toggle {
+      flex: 0 0 auto;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 4px 7px;
+      background: var(--hover);
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      line-height: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .accs {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      margin: 8px -8px 0;
+      max-height: 128px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .accs::-webkit-scrollbar { display: none; }
+    .accs .now {
+      padding-bottom: 6px;
+    }
+    .accs .tag {
+      padding: 0 8px 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .02em;
+      color: var(--faint);
+    }
+    .accs .rest {
+      border-top: 0.5px solid var(--line);
+      margin: 2px 8px 0;
+      padding-top: 6px;
+    }
+    .account-row-shell {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      align-items: center;
+      gap: 2px;
+      min-width: 0;
+    }
+    .accs .account-pick {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      justify-content: stretch;
+      gap: 10px;
+      min-width: 0;
+      width: 100%;
+      text-align: left;
+      appearance: none; border: 0; background: none; font: inherit;
+      padding: 6px 4px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 18px;
+      font-weight: 400;
+      color: var(--text);
+      cursor: pointer;
+      transition: background .2s var(--ease);
+    }
+    .accs .account-pick:hover { background: var(--hover); }
+    .accs .account-pick.on { background: var(--hover); }
+    .account-row-shell.is-current .account-pick {
+      grid-template-columns: minmax(0, 1fr) auto;
+      padding-block: 7px;
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 700;
+    }
+    .account-row-shell.is-current {
+      grid-template-columns: 0 minmax(0, 1fr);
+      gap: 0;
+    }
+    .account-row-shell.is-current .account-monitor-spacer { width: 0; }
+    .account-monitor-spacer {
+      display: block;
+      width: 24px;
+      height: 28px;
+    }
+    .account-monitor-cancel {
+      flex: 0 0 auto;
+      width: 24px !important;
+      height: 28px;
+      appearance: none;
+      border: 0;
+      border-radius: 7px;
+      padding: 0 !important;
+      background: transparent;
+      color: var(--faint) !important;
+      font: inherit;
+      font-size: 16px !important;
+      line-height: 16px;
+      font-weight: 500 !important;
+      cursor: pointer;
+    }
+    .account-monitor-cancel:hover { color: var(--text) !important; background: var(--hover); }
+    .monitor-picker {
+      margin-top: 8px;
+      padding: 6px;
+      border: .5px solid var(--line);
+      border-radius: 10px;
+      background: var(--card);
+    }
+    .monitor-picker-title {
+      padding: 2px 5px 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 16px;
+      font-weight: 700;
+    }
+    .monitor-restore {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 7px 6px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+    .monitor-restore:hover { background: var(--hover); }
+    .monitor-restore .who {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .monitor-restore .restore-label {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .accs .who {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 400;
+    }
+    .accs .identity {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: auto;
+      max-width: none;
+      min-width: 0;
+    }
+    .account-row-shell.is-current .identity {
+      width: auto;
+      max-width: none;
+    }
+    .account-row-shell.is-current .who { font-weight: 700; }
+    .source-badge {
+      flex: 0 0 auto;
+      padding: 1px 5px;
+      border-radius: 99px;
+      background: color-mix(in srgb, var(--codex) 10%, var(--card));
+      color: var(--codex);
+      font-size: 9px;
+      line-height: 14px;
+      font-weight: 700;
+      letter-spacing: .01em;
+      white-space: nowrap;
+    }
+    .overview-picker .source-badge {
+      margin-left: 6px;
+    }
+    .accs .identity .who {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .accs .wins {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+    .accs .win {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .accs .lab {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: .01em;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .accs .mini {
+      width: 40px;
+      height: 5px;
+      border-radius: 99px;
+      background: var(--track);
+      overflow: hidden;
+    }
+    .accs .mini.claude { background: color-mix(in srgb, var(--claude) 28%, var(--card)); }
+    .accs .mini.codex { background: color-mix(in srgb, var(--codex) 28%, var(--card)); }
+    .accs .mini.grok { background: color-mix(in srgb, var(--grok) 14%, var(--card)); }
+    .accs .mini i {
+      display: block;
+      width: 100%;
+      height: 5px;
+      border-radius: 99px;
+      transform: scaleX(var(--fill, 0));
+      transform-origin: left center;
+    }
+    .accs .win.is-empty { opacity: .45; }
+    .account-row-shell.is-current .lab { font-weight: 650; }
+
+    .empty { padding: 8px 0 4px; }
+    .empty-title {
+      margin: 0 0 4px;
+      font-size: 15px;
+      line-height: 20px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      text-wrap: pretty;
+    }
+    .empty-copy {
+      margin: 0;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 500;
+      color: var(--muted);
+      text-wrap: pretty;
+    }
+    .skel { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 4px; }
+    .sk {
+      height: 11px;
+      width: 42%;
+      border-radius: 6px;
+      background: var(--track);
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    .sk.t { height: 18px; width: 34%; border-radius: 7px; }
+    .sk.s { height: 10px; width: 56%; }
+    .sk.h { height: 14px; width: 22%; }
+    .sk.bar { height: 6px; width: 100%; border-radius: 99px; }
+    .sk.line { width: 72%; height: 11px; margin: 0; }
+    .sk.short { width: 48%; }
+    .autostart-nudge {
+      position: fixed;
+      z-index: 9;
+      left: 50%;
+      bottom: 72px;
+      width: min(352px, calc(100vw - 28px));
+      transform: translateX(-50%);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px 12px;
+      padding: 13px 14px;
+      border: 0.5px solid color-mix(in srgb, var(--sel) 28%, var(--line));
+      border-radius: 13px;
+      background: color-mix(in srgb, var(--card) 94%, var(--sel) 6%);
+      box-shadow: 0 14px 34px rgba(var(--shadow), .22);
+    }
+    .autostart-copy { min-width: 0; }
+    .autostart-title {
+      margin: 0 0 3px;
+      font-size: 13px;
+      line-height: 18px;
+      font-weight: 760;
+    }
+    .autostart-text {
+      margin: 0;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 15px;
+      font-weight: 520;
+    }
+    .autostart-actions {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: center;
+      gap: 5px;
+    }
+    .autostart-actions button {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 9px;
+      font: inherit;
+      font-size: 10px;
+      line-height: 14px;
+      font-weight: 720;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .autostart-enable { background: var(--sel); color: #fff; }
+    .autostart-later { background: transparent; color: var(--muted); }
+    .runtime-warning {
+      margin: 10px 14px 0;
+      padding: 10px 12px;
+      border: 0.5px solid color-mix(in srgb, #d97706 42%, var(--line));
+      border-radius: 10px;
+      background: color-mix(in srgb, #f59e0b 9%, var(--card));
+      color: var(--text);
+      font-size: 11px;
+      line-height: 16px;
+    }
+    .runtime-warning strong { display: block; margin-bottom: 2px; font-size: 12px; }
+    .update-banner {
+      display: flex; align-items: center; gap: 10px;
+      margin: 10px 14px 0; padding: 10px 12px;
+      border: 0.5px solid color-mix(in srgb, var(--fresh) 46%, var(--line));
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--fresh) 10%, var(--card));
+      color: var(--text); font-size: 11px; line-height: 16px;
+    }
+    .update-banner .grow { flex: 1; min-width: 0; }
+    .update-banner strong { display: block; margin-bottom: 2px; font-size: 12px; }
+    .update-apply {
+      flex: none; border: 0; border-radius: 8px; cursor: pointer;
+      padding: 6px 12px; font: inherit; font-weight: 700;
+      background: var(--fresh); color: #fff;
+    }
+    .update-apply[disabled] { opacity: .6; cursor: default; }
+    .update-badge {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      appearance: none;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--fresh);
+      cursor: pointer;
+      transition: background .18s var(--ease), color .18s var(--ease);
+    }
+    .update-badge:hover,
+    .update-badge[aria-expanded="true"] {
+      background: var(--hover);
+    }
+    .update-badge svg { width: 18px; height: 18px; display: block; }
+    .update-badge .badge-arrow { transition: transform .22s var(--ease); }
+    .update-badge:hover .badge-arrow,
+    .update-badge:focus-visible .badge-arrow { transform: translateY(1.5px); }
+    .update-badge:active .badge-arrow { transform: translateY(2.5px); }
+    @keyframes pulse {
+      0%, 100% { opacity: .42; }
+      50% { opacity: .88; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .sk { animation: none; }
+      .overview-notice { animation: none; }
+      .update-badge .badge-arrow { transition: none; }
+      .update-badge:hover .badge-arrow,
+      .update-badge:focus-visible .badge-arrow,
+      .update-badge:active .badge-arrow { transform: none; }
+      .heat-cell { animation: none; transition: none; }
+      .heat-cell::after { transition: none; }
+      .body.tab-enter, .menu.tab-enter { animation: none; }
+      .tabs button, .menu button, .meter-pct, .meter-reset, .disclose, .accs button,
+      .overview-add, .overview-picker button, .overview-remove,
+      .overview-mode-toggle, .overview-mode-toggle::before, .overview-mode-toggle .mode-option,
+      .account-list-dropdown.is-opening, .account-list-dropdown.is-closing,
+      .app-menu-button, .app-menu-item, .language-option, .autostart-actions button,
+      .help-action, .help-advanced-toggle {
+        transition: none;
+      }
+      .help-view::before { animation: none; }
+    }
+    button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--sel);
+      outline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" id="skip-link" href="#card">跳到额度</a>
+  <div class="popover">
+    <div class="app-menu-shell" id="app-menu"></div>
+    <nav class="tabs" id="tabs"></nav>
+    <div id="update-banner" aria-live="polite"></div>
+    <div id="runtime-warning" aria-live="polite"></div>
+    <main class="body" id="card"></main>
+    <div id="autostart-nudge"></div>
+    <div class="menu" id="menu"></div>
+  </div>
+  <script src="i18n.js?v=20260906a"></script>
+  <script>
+    const NAMES = { claude: "Claude", codex: "Codex", grok: "Grok" };
+    const I18N = window.SANDGLASS_I18N;
+    const MENU_ICO = {
+      refresh: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.2 8a4.8 4.8 0 0 1 8.3-3.2L13 6.2"/><path d="M12.8 8a4.8 4.8 0 0 1-8.3 3.2L3 9.8"/><path d="M13 3.5v2.7H10.3"/></svg>',
+      back: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 3.5 6 8l4.5 4.5"/></svg>',
+    };
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let overviewNoticeTimer = null;
+    let telemetryCopyTimer = null;
+    let accountListMotionTimer = null;
+
+    const state = {
+      accounts: [],
+      providers: {},
+      report: null,
+      localWindows: [],
+      telemetry: null,
+      diagnostics: null,
+      update: null,
+      updateBanner: false,
+      updateApplying: false,
+      updateError: "",
+      telemetrySetup: "",
+      telemetryEnabling: "",
+      telemetryCopied: "",
+      locale: I18N.resolve(readStore("sandglass.ui.language", navigator.language)),
+      appMenu: false,
+      help: false,
+      helpAdvanced: false,
+      adapterSkillCopied: false,
+      productMode: { selected: false, attribution_mode: "", skill_required: false },
+      productModeBeforeEdit: null,
+      productModeLoaded: false,
+      productModeError: false,
+      tab: readStore("sandglass.ui.tab", "overview"),
+      polarity: readStore("sandglass.ui.polarity", "left"),
+      resetMode: readStore("sandglass.ui.reset", "countdown"),
+      activityRange: readStore("sandglass.ui.activityRange", "all"),
+      chosen: {},
+      switcher: false,
+      languageOptions: false,
+      accountListMotion: "",
+      overviewIds: readListStore("sandglass.ui.overviewAccounts"),
+      overviewMode: readStore("sandglass.ui.overviewMode", "default") === "custom" ? "custom" : "default",
+      overviewPicker: false,
+      hiddenMonitorIds: readListStore("sandglass.ui.hiddenMonitorAccounts") || [],
+      monitorPickerProvider: "",
+      overviewScan: "idle",
+      overviewScanNotice: "",
+      overviewEmptyScans: 0,
+      stale: false,
+      lastOkAt: 0,
+      loadingQuota: false,
+      loadingReport: false,
+      loadingLocal: false,
+      localError: false,
+      localRetrying: false,
+      loadingTelemetry: false,
+      reportAt: 0,
+      localAt: 0,
+      telemetryAt: 0,
+      quotaSeq: 0,
+      hardError: false,
+      desktopAutostart: null,
+      autostartPromptDismissed: sessionStorage.getItem("sandglass.ui.autostartDismissed") === "1",
+      autostartError: false,
+    };
+    let localLoadPromise = null;
+
+    function readStore(key, fallback) {
+      try { const v = localStorage.getItem(key); if (v) return v; } catch (e) {}
+      return fallback;
+    }
+    function writeStore(key, value) {
+      try { localStorage.setItem(key, value); } catch (e) {}
+    }
+    function readListStore(key) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw == null) return null;
+        const value = JSON.parse(raw);
+        return Array.isArray(value) ? value.filter(v => typeof v === "string") : null;
+      } catch (e) { return null; }
+    }
+    function writeListStore(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+    }
+    function t(key, values) { return I18N.translate(state.locale, key, values); }
+    function autostartNudgeHtml() {
+      if (state.desktopAutostart !== false || state.autostartPromptDismissed) return "";
+      return `<aside class="autostart-nudge" role="status">
+        <div class="autostart-copy">
+          <p class="autostart-title">${esc(t("autostartTitle"))}</p>
+          <p class="autostart-text">${esc(t(state.autostartError ? "autostartFailed" : "autostartCopy"))}</p>
+        </div>
+        <div class="autostart-actions">
+          <button type="button" class="autostart-enable" data-act="autostart-enable">${esc(t("enableAutostart"))}</button>
+          <button type="button" class="autostart-later" data-act="autostart-later">${esc(t("later"))}</button>
+        </div>
+      </aside>`;
+    }
+    async function loadDesktopAutostart() {
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || typeof api.autostart_status !== "function") return;
+      try {
+        state.desktopAutostart = !!(await api.autostart_status());
+        render();
+      } catch (e) {}
+    }
+    async function enableDesktopAutostart() {
+      const api = window.pywebview && window.pywebview.api;
+      if (!api || typeof api.enable_autostart !== "function") return;
+      state.autostartError = false;
+      try {
+        const enabled = !!(await api.enable_autostart());
+        state.desktopAutostart = enabled ? true : false;
+        state.autostartError = !enabled;
+      } catch (e) {
+        state.autostartError = true;
+      }
+      render();
+    }
+    function formatInt(value) {
+      return new Intl.NumberFormat(state.locale, { maximumFractionDigits: 0 }).format(Number(value) || 0);
+    }
+    function localizedQuotaError(value) {
+      const message = String(value || "");
+      const lower = message.toLowerCase();
+      if (lower.includes("expired") || lower.includes("re-login") || lower.includes("relogin")) {
+        if (lower.includes("rate limit")) return t("rateLimited");
+        return t("authExpired");
+      }
+      if (lower.includes("rate limit")) return t("rateLimited");
+      return message;
+    }
+    function applyLocale() {
+      document.documentElement.lang = state.locale;
+      document.getElementById("meta-description").setAttribute("content", t("metaDescription"));
+      document.getElementById("skip-link").textContent = t("skipQuota");
+    }
+    function setOverviewNotice(text) {
+      if (overviewNoticeTimer) clearTimeout(overviewNoticeTimer);
+      overviewNoticeTimer = null;
+      state.overviewScanNotice = text;
+      if (text) {
+        overviewNoticeTimer = setTimeout(() => {
+          overviewNoticeTimer = null;
+          state.overviewScanNotice = "";
+          render();
+        }, 4000);
+      }
+    }
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function pad2(n) { return String(n).padStart(2, "0"); }
+    function neu(u) { u = u || {}; return Number(u.input_tokens || 0) + Number(u.output_tokens || 0); }
+    function compact(n) {
+      n = Number(n) || 0;
+      const abs = Math.abs(n);
+      const sign = n < 0 ? "-" : "";
+      const units = [[1e9, 1e9, "B"], [1e6, 1e6, "M"], [1e3, 1e3, "K"]];
+      for (const [th, div, suf] of units) {
+        if (abs >= th) {
+          const scaled = abs / div;
+          const formatted = scaled >= 10
+            ? String(Math.round(scaled))
+            : (Math.round(scaled * 10) / 10).toString().replace(/\.0$/, "");
+          return sign + formatted + suf;
+        }
+      }
+      return String(Math.round(n));
+    }
+    function localDay(d) {
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    }
+    function lastUsedMs(a) {
+      const v = a.last_used_at || a.last_usage_at;
+      if (typeof v === "number" && Number.isFinite(v)) return v > 1e12 ? v : v * 1000;
+      const t = Date.parse(v || "");
+      return Number.isNaN(t) ? 0 : t;
+    }
+    function loggedIn(p) {
+      const list = state.accounts.filter(a => a.provider === p);
+      return list.find(a => a.active)
+        || list.find(a => a.quota_source === "live")
+        || list.slice().sort((a, b) => lastUsedMs(b) - lastUsedMs(a))[0]
+        || list[0];
+    }
+    function accountKey(a) { return `${a.provider}:${a.account_id}`; }
+    function isAccountMonitored(a) {
+      const current = loggedIn(a.provider);
+      if (current && current.account_id === a.account_id) return true;
+      return !state.hiddenMonitorIds.includes(accountKey(a));
+    }
+    function monitoredAccounts(provider) {
+      return state.accounts.filter(a => (!provider || a.provider === provider) && isAccountMonitored(a));
+    }
+    function defaultOverviewAccounts() {
+      return ["codex", "claude", "grok"].map(loggedIn).filter(Boolean);
+    }
+    function selectedOverviewIds() {
+      if (state.overviewMode === "default") return defaultOverviewAccounts().map(accountKey);
+      return state.overviewIds || [];
+    }
+    function selectedOverviewAccounts() {
+      const byKey = new Map(state.accounts.map(a => [accountKey(a), a]));
+      const accounts = selectedOverviewIds().slice().reverse().map(key => byKey.get(key)).filter(Boolean);
+      return state.overviewMode === "default" ? accounts.reverse() : accounts.filter(isAccountMonitored);
+    }
+    function startOverviewCustomizing() {
+      if (state.overviewIds === null) state.overviewIds = defaultOverviewAccounts().map(accountKey);
+    }
+    function saveOverviewIds() {
+      writeListStore("sandglass.ui.overviewAccounts", state.overviewIds || []);
+    }
+    function revertView(p) {
+      if (p) delete state.chosen[p];
+      else state.chosen = {};
+    }
+    function loginIds() {
+      const ids = {};
+      for (const p of ["codex", "claude", "grok"]) {
+        const acc = loggedIn(p);
+        if (acc) ids[p] = acc.account_id;
+      }
+      return ids;
+    }
+    function followLoginChange(prev) {
+      const now = loginIds();
+      for (const p of Object.keys(now)) {
+        if (prev[p] && prev[p] !== now[p]) revertView(p);
+      }
+    }
+    function viewed(p) {
+      if (!state.switcher) return loggedIn(p);
+      const list = state.accounts.filter(a => a.provider === p);
+      const want = state.chosen[p];
+      if (want) {
+        const hit = list.find(a => a.account_id === want);
+        if (hit) return hit;
+      }
+      return loggedIn(p);
+    }
+    function windowsOf(acc) {
+      const list = (acc.windows || []).filter(w => w.used_percent != null);
+      const five = list.find(w => w.label === "5h" || w.label === "primary");
+      const week = list.find(w => w.label === "7d" || w.label === "weekly" || w.label === "30d");
+      const shown = [];
+      if (five) shown.push(five);
+      if (week) shown.push(week);
+      list.filter(w => w !== five && w !== week).forEach(w => shown.push(w));
+      if (!shown.length && list[0]) shown.push(list[0]);
+      return shown;
+    }
+    function windowName(label) {
+      const names = {
+        "5h": "window5h", primary: "window5h",
+        "7d": "window7d", weekly: "window7d",
+        "30d": "window30d",
+        "7d opus": "window7dOpus",
+        "7d sonnet": "window7dSonnet",
+      };
+      return names[label] ? t(names[label]) : String(label || "").slice(0, 24);
+    }
+    function remainingSeconds(w) {
+      if (w && w.resets_at) {
+        const at = Date.parse(w.resets_at);
+        if (Number.isFinite(at)) return Math.max(0, Math.ceil((at - Date.now()) / 1000));
+      }
+      const raw = Number(w && w.resets_in_seconds);
+      return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : null;
+    }
+    function isExpired(w) { return w.resets_in === "now" || remainingSeconds(w) === 0; }
+    function quotaWindowUnavailable(acc, w) {
+      return Boolean(isExpired(w) && (!acc || acc.quota_source !== "live"));
+    }
+    function usedOf(w) {
+      if (isExpired(w)) return 0;
+      const n = Number(w.used_percent);
+      if (!Number.isFinite(n)) return 0;
+      return Math.min(100, Math.max(0, n));
+    }
+    function displayN(w) {
+      const used = usedOf(w);
+      const n = state.polarity === "left" ? 100 - used : used;
+      if (n > 0 && n < 1) return 0;
+      return Math.round(n);
+    }
+    function polarityWord() { return t(state.polarity === "left" ? "remaining" : "used"); }
+    function fillWidth(w) {
+      const n = state.polarity === "left" ? 100 - usedOf(w) : usedOf(w);
+      if (n < 0.5) return 0;
+      if (n >= 99.5) return 100;
+      return n;
+    }
+    function resetDuration(w) {
+      const raw = remainingSeconds(w);
+      if (!raw) return String(w.resets_in || "");
+      let seconds = raw;
+      const days = Math.floor(seconds / 86400);
+      seconds %= 86400;
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const parts = [];
+      if (days) parts.push(t("durationDay", { count: days }));
+      if (hours && parts.length < 2) parts.push(t("durationHour", { count: hours }));
+      if (!days && minutes && parts.length < 2) parts.push(t("durationMinute", { count: minutes }));
+      return parts.join(" ");
+    }
+    function whenText(w, row, acc) {
+      // A Codex window only starts counting at its first token. Until then the quota is
+      // simply full, and counting down to a reset that has not begun reads as pressure
+      // to spend it before a deadline that does not exist.
+      if (acc && acc.quota_source === "stale") return "";
+      const localSpent = spentTokens(row && row.usage);
+      if (acc && acc.provider === "codex" && Number(w.used_percent) === 0 && localSpent <= 0) return t("timerNotStarted");
+      if (isExpired(w)) return t("resetNow");
+      if (state.resetMode === "clock" && w.resets_at) {
+        const d = new Date(w.resets_at);
+        if (!Number.isNaN(d.getTime())) {
+          const now = new Date();
+          const sameDay = d.toDateString() === now.toDateString();
+          const tom = new Date(now); tom.setDate(tom.getDate() + 1);
+          const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+          if (sameDay) return t("resetAt", { time });
+          if (d.toDateString() === tom.toDateString()) return t("resetTomorrowAt", { time });
+          return t("resetDateAt", { date: `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`, time });
+        }
+      }
+      const sec = remainingSeconds(w);
+      if (sec > 0 && sec < 60) return t("resetUnderMinute");
+      if (!w.resets_in) return "";
+      if (w.resets_in === "now") return t("resetNow");
+      return t("resetAfter", { duration: resetDuration(w) });
+    }
+    function identity(acc) {
+      return acc.email || (acc.label || "").split(" · ")[0] || "";
+    }
+    function stampDueAt(acc) {
+      if (!acc || acc.quota_source !== "live" || !acc.quota_refresh_at) return 0;
+      const ms = Date.parse(acc.quota_refresh_at);
+      return Number.isFinite(ms) ? ms : 0;
+    }
+    function stampLabel(acc) {
+      if (acc && acc.quota_source === "stale") return t("notUpdated");
+      if (acc && acc.quota_error) return localizedQuotaError(acc.quota_error);
+      const due = stampDueAt(acc);
+      if (due) {
+        const seconds = Math.max(0, Math.ceil((due - Date.now()) / 1000));
+        return seconds ? t("refreshIn", { seconds }) : t("refreshing");
+      }
+      if (state.stale && state.lastOkAt) return t("notUpdated");
+      if (state.loadingQuota || !state.lastOkAt) return t("refreshing");
+      return "";
+    }
+    function paintStamps() {
+      document.querySelectorAll("[data-stamp]").forEach((el) => {
+        const key = el.getAttribute("data-stamp");
+        const acc = state.accounts.find((row) => accountKey(row) === key);
+        if (!acc) return;
+        const next = stampLabel(acc);
+        if (el.textContent !== next) el.textContent = next;
+      });
+      maybePollDueQuota();
+    }
+    let duePollArmed = true;
+    function maybePollDueQuota() {
+      if (state.loadingQuota || document.hidden) return;
+      const waiting = state.accounts.some((acc) => {
+        const due = stampDueAt(acc);
+        return due && due <= Date.now();
+      });
+      if (!waiting) {
+        duePollArmed = true;
+        return;
+      }
+      if (!duePollArmed) return;
+      duePollArmed = false;
+      loadQuota();
+    }
+    function stampErr(acc) { return !!(acc && acc.quota_error && acc.quota_source !== "stale"); }
+    function providerDays(p) {
+      return ((state.report && state.report.by_provider_day) || {})[p] || [];
+    }
+    function daySlots(p) {
+      const by = {};
+      for (const r of providerDays(p)) by[r.key] = r;
+      const slots = [];
+      const now = new Date(); now.setHours(0, 0, 0, 0);
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const key = localDay(d);
+        slots.push(by[key] || { key, usage: {} });
+      }
+      return slots;
+    }
+    function tightest(acc) {
+      const wins = windowsOf(acc);
+      if (!wins.length) return null;
+      return wins.slice().sort((a, b) => usedOf(b) - usedOf(a))[0];
+    }
+    function pctLabel(w) {
+      const n = displayN(w);
+      if (n === 0 && fillWidth(w) === 0 && usedOf(w) > 0 && usedOf(w) < 1) {
+        return `<1% ${polarityWord()}`;
+      }
+      return `${n}% ${polarityWord()}`;
+    }
+    function windowAliases(label) {
+      if (label === "5h" || label === "primary") return ["5h", "primary"];
+      if (label === "7d" || label === "weekly" || label === "30d") return ["7d", "weekly", "30d"];
+      return [label];
+    }
+    function sameAccount(row, acc) {
+      return row && acc && row.provider === acc.provider && row.account_id === acc.account_id;
+    }
+    function localWin(acc, w) {
+      const fromApi = ((state.localWindows || []).find(row => sameAccount(row, acc)) || {}).windows || [];
+      if (fromApi.length) {
+        const want = windowAliases(w.label);
+        return fromApi.find(r => want.includes(r.label)) || null;
+      }
+      if (acc && acc.quota_source === "stale") return null;
+      const fromReport = (((state.report && state.report.accounts) || []).find(row => sameAccount(row, acc)) || {}).local_in_windows || [];
+      const want = windowAliases(w.label);
+      return fromReport.find(r => want.includes(r.label)) || null;
+    }
+    // Real work is what the model produced. Input and cache are what it had to read to
+    // get there, and cache volume swings 18x-324x between vendors, so totals compare
+    // nothing. Grok and Codex report reasoning separately; Claude bills it inside
+    // output, so adding it is correct for all three.
+    function madeTokens(u) {
+      // output_tokens already contains the thinking. All three vendors nest it:
+      // their own totals are input + output with reasoning never added on top
+      // (26,847 + 215 = 27,062 while reasoning reads 75), and across 24,097
+      // minutes of local history reasoning never once exceeds output.
+      u = u || {};
+      return Number(u.output_tokens || 0);
+    }
+    function spentTokens(u) {
+      // What the quota is actually metered on. Measured: total tokens per 1% of a
+      // Codex week reads 1,657,538 / 1,678,120 / 1,668,488 across three accounts
+      // -- 0.6% apart. The same accounts' output per 1% spans 73%.
+      return Number((u || {}).total_tokens || 0);
+    }
+    async function loadProductMode() {
+      try {
+        const response = await fetch("/api/product-mode");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.productMode = await response.json();
+        state.productModeError = false;
+        state.productModeBeforeEdit = null;
+        if (!state.productMode.selected) {
+          state.tab = "overview";
+          state.help = false;
+        }
+      } catch (e) {
+        state.productModeError = true;
+      } finally {
+        state.productModeLoaded = true;
+        render();
+      }
+    }
+    async function chooseProductMode(mode) {
+      try {
+        const response = await fetch("/api/product-mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ attribution_mode: mode }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.productMode = await response.json();
+        state.productModeLoaded = true;
+        if (mode === "skill_assisted") {
+          await loadQuota(true);
+          state.help = true;
+          state.helpAdvanced = true;
+          renderTabChange();
+          requestAnimationFrame(focusHelpView);
+        } else {
+          state.help = false;
+          loadQuota(true);
+        }
+        return true;
+      } catch (e) {
+        setOverviewNotice(t("modeSaveFailed"));
+        render();
+        return false;
+      }
+    }
+    function userSourceNames(row) {
+      return (row && row.evidence_sources || [])
+        .filter(source => String(source).startsWith("user_adapter:"))
+        .map(source => String(source).slice("user_adapter:".length));
+    }
+    function withUserSources(text, row) {
+      const sources = userSourceNames(row);
+      return sources.length
+        ? `${text} · ${t("userAdapterVerified", { sources: sources.join(", ") })}`
+        : text;
+    }
+    function localLine(row, w) {
+      if (!row) return "";
+      const spent = spentTokens(row.usage);
+      if (spent <= 0) return "";
+      const used = Number(w && w.used_percent);
+      const calls = Number((row.usage || {}).calls || 0);
+      // After a reset card the percentage covers only part of what is counted here,
+      // so folding it out to a full window would produce a wild number.
+      if (row.reset_anchored) return `${t("usage", { value: compact(spent) })} · ${t("resetOccurred")}`;
+      if (row.full_window_inference_allowed === false) return t("usage", { value: compact(spent) });
+      // Observation stopped for a while, so a reset may have gone unseen and used%
+      // can no longer be trusted to cover the same span.
+      if (row.observation_gap) return t("usage", { value: compact(spent) });
+      // Folding a whole window out of a thin sample amplifies one cold start into
+      // nonsense, so only extrapolate once the window has been worked in.
+      if (!Number.isFinite(used) || used < 10 || calls < 20) return t("usage", { value: compact(spent) });
+      return `${t("usage", { value: compact(spent) })} · ${t("fullWindow", { value: compact(spent / used * 100) })}`;
+    }
+    function localTitle(row, w) {
+      if (!row) return "";
+      const u = row.usage || {};
+      const spent = spentTokens(u);
+      if (spent <= 0) return "";
+      const made = madeTokens(u);
+      const think = Number(u.reasoning_tokens || 0);
+      const used = Number(w && w.used_percent);
+      const parts = [t("windowUsage", { spent: formatInt(spent), output: formatInt(made) })];
+      // Thinking is part of the output, not an addition to it.
+      parts.push(think > 0 ? t("reasoning", { value: formatInt(think) }) : "");
+      parts.push(t("billingExplanation"));
+      const sourceNames = userSourceNames(row);
+      if (sourceNames.length) parts.push(t("userAdapterVerified", { sources: sourceNames.join(", ") }));
+      if (row.reset_anchored) {
+        parts.push(t("resetExplanation"));
+      } else if (row.full_window_inference_allowed === false) {
+        // One flag, two unrelated causes: an unauthorised user adapter, and a
+        // quota reading that went stale. Naming only the first told people with
+        // no adapter at all that their numbers involved one -- which is what a
+        // rate-limited provider looked like from here.
+        if (userSourceNames(row).length) {
+          parts.push(t("userSourceWindowLocked"));
+        } else if (row.boundary_source === "local_token_timeline") {
+          parts.push(t("rolledWindowExplanation"));
+        } else {
+          parts.push(t("staleQuotaExplanation"));
+        }
+      } else if (row.observation_gap) {
+        parts.push(t("gapExplanation"));
+      } else if (Number.isFinite(used) && used >= 10 && Number(u.calls || 0) >= 20) {
+        parts.push(t("estimateExplanation", { used, value: formatInt(Math.round(spent / used * 100)) }));
+      }
+      parts.push(t("localOnlyExplanation"));
+      return parts.join("");
+    }
+
+    function meterHtml(acc, w) {
+      const row = w.missing || isExpired(w) ? null : localWin(acc, w);
+      const local = localLine(row, w);
+      const tip = local ? localTitle(row, w) : "";
+      const name = `<div class="meter-head"><h2 class="meter-name">${esc(windowName(w.label))}</h2>${local ? `<span class="meter-local" title="${esc(tip)}">${esc(local)}</span>` : ""}</div>`;
+      const unavailable = !w.missing && quotaWindowUnavailable(acc, w);
+      if (w.missing || unavailable) {
+        // An empty window and a stale window are two different reasons already,
+        // and a captured fetch failure is a third: say that one first when it
+        // exists, verbatim, rather than folding it into "no window here".
+        const reason = acc && acc.quota_error
+          ? localizedQuotaError(acc.quota_error)
+          : t(unavailable ? "notUpdated" : "noWindow");
+        return `<div class="meter is-empty">
+          ${name}
+          <div class="bar ${esc(acc.provider)}"><span class="fill" style="--fill:0"></span></div>
+          <div class="meter-bot"><span class="meter-pct">${esc(reason)}</span></div>
+        </div>`;
+      }
+      const fill = fillWidth(w);
+      const reset = whenText(w, row, acc);
+      return `<div class="meter">
+        ${name}
+        <div class="bar ${esc(acc.provider)}">
+          <span class="fill" style="--fill:${(fill / 100).toFixed(4)}"></span>
+        </div>
+        <div class="meter-bot">
+          <button type="button" class="meter-pct" data-act="polarity">${esc(pctLabel(w))}</button>
+          ${reset ? `<button type="button" class="meter-reset" data-act="reset">${esc(reset)}</button>` : ""}
+        </div>
+      </div>`;
+    }
+
+    // One local year, independent of any quota window. Each square is one local
+    // calendar day and plots total_tokens, the same consumption definition as above.
+    function dayDate(day) {
+      const [year, month, date] = String(day || "").split("-").map(Number);
+      return new Date(year, month - 1, date);
+    }
+    function usageStreaks(days) {
+      let longest = 0;
+      let run = 0;
+      for (const day of days) {
+        if (Number(day.spent || 0) > 0) {
+          run += 1;
+          longest = Math.max(longest, run);
+        } else {
+          run = 0;
+        }
+      }
+      return { current: run, longest };
+    }
+    function activityStat(value, label) {
+      return `<div class="activity-stat"><b>${esc(value)}</b><span>${esc(label)}</span></div>`;
+    }
+    function activityDate(day) {
+      return new Intl.DateTimeFormat(state.locale, { month: "short", day: "numeric" }).format(dayDate(day));
+    }
+    function weekHeatHtml(days, peak, rangeKey) {
+      const heatDays = days;
+      const columns = rangeKey === "7" ? 7 : rangeKey === "30" ? 10 : 18;
+      const edgeSpan = Math.max(2, Math.ceil(columns * 0.35));
+      const activeDays = heatDays.filter(day => Number(day.spent || 0) > 0).length;
+      const cells = heatDays.map((day, index) => {
+        const v = Number(day.spent || 0);
+        const alpha = v ? (0.18 + 0.82 * Math.sqrt(v / peak)).toFixed(3) : "";
+        const date = activityDate(day.day);
+        const title = v ? `${date} · ${t("used")} ${compact(v)} Token` : date;
+        const column = index % columns;
+        const edge = column < edgeSpan ? " tip-left" : column >= columns - edgeSpan ? " tip-right" : "";
+        const style = `${v ? `--alpha:${alpha};` : ""}--delay:${Math.min(index * 3, 360)}ms`;
+        return `<span class="heat-cell${v ? " used" : ""}${edge}" style="${style}" data-tip="${esc(title)}" aria-hidden="true"></span>`;
+      }).join("");
+      const last = heatDays.length ? activityDate(heatDays[heatDays.length - 1].day) : "";
+      return `<div class="week-heat range-${esc(rangeKey)}" role="img" aria-label="${esc(t("activeDaysSummary", { count: activeDays }))}">${cells}</div><div class="heat-axis"><span>${esc(last)}</span></div>`;
+    }
+    function activityRangeHtml() {
+      return `<div class="activity-range" aria-label="${esc(t("activityRangeLabel"))}">
+        ${[["all", t("rangeAll")], ["30", t("range30d")], ["7", t("range7d")]].map(([value, label]) =>
+          `<button type="button" class="${state.activityRange === value ? "on" : ""}" data-act="activity-range" data-range="${value}" aria-pressed="${state.activityRange === value ? "true" : "false"}">${label}</button>`
+        ).join("")}
+      </div>`;
+    }
+    function activityHtml(acc) {
+      const row = (state.localWindows || []).find(a => sameAccount(a, acc));
+      const span = row && (row.activity || row.activity365);
+      if (!span) return "";
+      const days = span.days || [];
+      const range = state.activityRange === "all" ? days : days.slice(-Number(state.activityRange));
+      const viewDays = range;
+      const spent = viewDays.reduce((sum, day) => sum + Number(day.spent || 0), 0);
+      const made = viewDays.reduce((sum, day) => sum + Number(day.made || 0), 0);
+      const heatDays = state.activityRange === "all" ? days.slice(-180) : viewDays;
+      const peak = Math.max(1, ...heatDays.map(d => Number(d.spent || 0)));
+      const heat = weekHeatHtml(heatDays, peak, state.activityRange);
+      const streaks = usageStreaks(viewDays);
+      const stats = [
+        activityStat(compact(spent), t("totalUsage")),
+        activityStat(compact(made), t("totalOutput")),
+        activityStat(t("daysShort", { count: streaks.longest }), t("longestStreak")),
+      ].join("");
+      return `<div class="cost">
+        ${activityRangeHtml()}
+        <div class="activity-stats">${stats}</div>
+        <div class="heat-head"><div class="cost-head">${esc(t("tokenActivity"))}</div></div>
+        <div class="heatmap ${esc(acc.provider)}">${heat}</div>
+        <p class="hint">${esc(t("localHeatHint"))}</p>
+      </div>`;
+    }
+
+    function headerHtml(acc, compact) {
+      const p = acc.provider;
+      const who = identity(acc);
+      const err = stampErr(acc);
+      const jump = compact
+        ? `button type="button" class="jump" data-tab="${esc(p)}"`
+        : `div class="jump"`;
+      const close = compact ? "button" : "div";
+      return `<div class="head">
+        <${jump}>
+          <div class="row">
+            <h1><span class="logo ${esc(p)}" aria-hidden="true"></span><span class="name">${esc(NAMES[p])}</span></h1>
+            ${who ? `<span class="email">${esc(who)}</span>` : ""}
+          </div>
+          <div class="row">
+            <span class="sub${err ? " err" : ""}" data-stamp="${esc(accountKey(acc))}">${esc(stampLabel(acc))}</span>
+            ${acc.plan ? `<span class="plan">${esc(acc.plan)}</span>` : ""}
+          </div>
+        </${close}>
+      </div>`;
+    }
+
+    function metersHtml(acc) {
+      const list = (acc.windows || []).filter(w => w.used_percent != null);
+      const five = list.find(w => w.label === "5h" || w.label === "primary");
+      const week = list.find(w => w.label === "7d" || w.label === "weekly" || w.label === "30d");
+      const extras = list.filter(w => w !== five && w !== week);
+      const slots = [
+        five || { label: "5h", missing: true },
+        week || { label: "7d", missing: true },
+        ...extras,
+      ];
+      return slots.map(w => meterHtml(acc, w)).join("");
+    }
+
+    function miniWins(acc) {
+      const list = windowsOf(acc);
+      const five = list.find(w => w.label === "5h" || w.label === "primary") || null;
+      const week = list.find(w => w.label === "7d" || w.label === "weekly" || w.label === "30d") || null;
+      return [five, week];
+    }
+    function miniLab(w, fallback) {
+      if (!w || !w.label) return fallback;
+      if (w.label === "primary") return "5h";
+      if (w.label === "weekly") return "7d";
+      return w.label;
+    }
+    function miniSlotHtml(w, p, lab, acc) {
+      const unavailable = w && quotaWindowUnavailable(acc, w);
+      if (!w || unavailable) {
+        const reason = acc && acc.quota_error
+          ? localizedQuotaError(acc.quota_error)
+          : t(unavailable ? "notUpdated" : "noWindow");
+        return `<span class="win is-empty" aria-label="${esc(`${lab} ${reason}`)}"><span class="lab">${esc(lab)}</span><span class="mini ${esc(p)}"></span></span>`;
+      }
+      const fill = Math.min(100, Math.max(0, fillWidth(w)));
+      return `<span class="win" aria-label="${esc(`${lab} ${pctLabel(w)}`)}"><span class="lab">${esc(lab)}</span><span class="mini ${esc(p)}"><i style="--fill:${(fill / 100).toFixed(4)};background:var(--${esc(p)})"></i></span></span>`;
+    }
+    function accountRowHtml(a, p, currentId) {
+      const who = identity(a) || a.account_id;
+      const [five, week] = miniWins(a);
+      const on = a.account_id === currentId ? " on" : "";
+      const cancelLabel = t("cancelMonitoringAria", { provider: NAMES[p], account: who });
+      const current = loggedIn(p);
+      const isCurrent = Boolean(current && current.account_id === a.account_id);
+      const cancel = isCurrent ? `<span class="account-monitor-spacer" aria-hidden="true"></span>` : `<button type="button" class="account-monitor-cancel" data-act="monitor-cancel" data-id="${esc(accountKey(a))}" aria-label="${esc(cancelLabel)}" title="${esc(cancelLabel)}">×</button>`;
+      return `<div class="account-row-shell${isCurrent ? " is-current" : ""}">${cancel}<button type="button" class="account-pick${on}" data-act="pick" data-id="${esc(a.account_id)}"><span class="identity"><span class="who">${esc(who)}</span></span><span class="wins">${miniSlotHtml(five, p, miniLab(five, "5h"), a)}${miniSlotHtml(week, p, miniLab(week, "7d"), a)}</span></button></div>`;
+    }
+    function accountListHtml(p, viewing) {
+      const allPeers = state.accounts.filter(a => a.provider === p);
+      if (!allPeers.length) return "";
+      const peers = allPeers.filter(isAccountMonitored);
+      const hidden = allPeers.filter(a => !isAccountMonitored(a));
+      const live = loggedIn(p);
+      if (!live) return "";
+      const monitoredLive = peers.find(a => a.account_id === live.account_id) || null;
+      const rest = peers.filter(a => !monitoredLive || a.account_id !== monitoredLive.account_id);
+      const open = state.switcher;
+      const showDropdown = open || state.accountListMotion === "closing";
+      const adding = state.monitorPickerProvider === p;
+      const accountListId = `account-list-${esc(p)}`;
+      const motionClass = state.accountListMotion === "opening"
+        ? " is-opening"
+        : state.accountListMotion === "closing" ? " is-closing" : "";
+      const discloseIcon = `<svg class="disclose-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>`;
+      const toggle = `<div class="account-list-head"><button type="button" class="disclose" data-act="switch" aria-expanded="${open ? "true" : "false"}"${showDropdown ? ` aria-controls="${accountListId}"` : ""}>${esc(t("accountList"))}<span class="n">${peers.length}</span>${discloseIcon}</button><button type="button" class="monitor-add-toggle" data-act="monitor-add-toggle" data-provider="${esc(p)}" aria-expanded="${adding ? "true" : "false"}">+ ${esc(t("addMonitoring"))}</button></div>`;
+      const addPicker = adding ? `<div class="monitor-picker" role="region" aria-label="${esc(t("addMonitoring"))}"><div class="monitor-picker-title">${esc(t(hidden.length ? "addMonitoring" : "noCanceledMonitoring"))}</div>${hidden.map(a => {
+        const who = identity(a) || a.account_id;
+        return `<button type="button" class="monitor-restore" data-act="monitor-restore" data-id="${esc(accountKey(a))}" aria-label="${esc(t("restoreMonitoringAria", { provider: NAMES[p], account: who }))}"><span class="who">${esc(who)}</span><span class="restore-label">${esc(t("restoreMonitoring"))}</span></button>`;
+      }).join("")}</div>` : "";
+      if (!showDropdown) return `<div class="acc-wrap">${toggle}${addPicker}</div>`;
+      const viewingId = viewing && viewing.account_id;
+      const restHtml = rest.length
+        ? `<div class="rest">${rest.map(a => accountRowHtml(a, p, viewingId)).join("")}</div>`
+        : "";
+      return `<div class="acc-wrap">${toggle}<div class="account-list-dropdown${motionClass}" id="${accountListId}" role="region" aria-label="${esc(t("accountList"))}"><div class="accs">
+        ${monitoredLive ? `<div class="now"><div class="tag">${esc(t("currentLogin"))}</div>${accountRowHtml(monitoredLive, p, viewingId)}</div>` : ""}
+        ${restHtml}
+      </div></div>${addPicker}</div>`;
+    }
+
+    function unassignedHtml(provider) {
+      const row = ((state.report && state.report.unassigned_by_provider) || [])
+        .find(item => item.provider === provider);
+      const value = spentTokens(row && row.usage);
+      if (value <= 0) return "";
+      const note = state.productMode.skill_required ? t("unassignedSkill") : t("unassignedHistory");
+      return `<div class="history-help">
+        <span class="history-label" tabindex="0" aria-describedby="unassigned-history-note">${esc(t("unassignedUsage", { value: compact(value) }))}</span>
+        <p class="history-note" id="unassigned-history-note" role="tooltip">${esc(note)}</p>
+      </div>`;
+    }
+
+    function telemetryTime(value) {
+      if (!value) return t("notUpdated");
+      const at = new Date(value);
+      if (!Number.isFinite(at.getTime())) return t("notUpdated");
+      return new Intl.DateTimeFormat(state.locale, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(at);
+    }
+
+    function telemetryEndpoint() {
+      const configured = state.telemetry && state.telemetry.receiver && state.telemetry.receiver.endpoint;
+      if (configured && /^https?:\/\//.test(configured)) return configured;
+      const port = /^\d+$/.test(location.port) ? location.port : "7740";
+      return configured ? `${location.protocol}//${location.host}${configured}` : `http://127.0.0.1:${port}/v1/logs`;
+    }
+
+    async function ensureTelemetryReceiver(provider = "") {
+      const receiver = state.telemetry && state.telemetry.receiver;
+      if (!receiver || receiver.manageable !== true) return true;
+      if (receiver.state === "ready" && (!provider || receiver.providers?.[provider] === true)) return true;
+      try {
+        const response = await fetch("/api/telemetry-receiver", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(provider ? { enabled: true, provider } : { enabled: true }),
+        });
+        if (!response.ok) return false;
+        const result = await response.json();
+        if (result.receiver) state.telemetry.receiver = result.receiver;
+        render();
+        return result.ok === true && result.receiver && result.receiver.state === "ready" && (!provider || result.receiver.providers?.[provider] === true);
+      } catch (_) {
+        return false;
+      }
+    }
+
+    async function disableTelemetryReceiver(provider = "") {
+      const response = await fetch("/api/telemetry-receiver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(provider ? { enabled: false, provider } : { enabled: false }),
+      });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (result.receiver) state.telemetry.receiver = result.receiver;
+      state.telemetryCopied = "";
+      render();
+    }
+
+    function telemetryPsQuote(value) {
+      return `'${String(value).replace(/'/g, "''")}'`;
+    }
+
+    function telemetryWindowsCli(names) {
+      // PowerShell's `codex`/`claude`/`grok` often resolve to npm *.ps1
+      // shims, which ExecutionPolicy blocks. Prefer Application (.cmd /
+      // .exe) on PATH so the command is not bound to one install layout.
+      const listed = names.map((name) => telemetryPsQuote(name)).join(", ");
+      const tried = names.join(", ");
+      return [
+        `$cli = @(${listed}) | ForEach-Object { Get-Command $_ -CommandType Application -ErrorAction SilentlyContinue } | Select-Object -First 1`,
+        `if (-not $cli) { throw 'official CLI not on PATH (tried ${tried})' }`,
+      ];
+    }
+
+    function telemetryCommand(provider) {
+      const endpoint = telemetryEndpoint();
+      if (provider === "claude") {
+        return telemetryWindowsCli(["claude.cmd", "claude.exe"]).concat([
+          "$env:CLAUDE_CODE_ENABLE_TELEMETRY='1'",
+          "$env:OTEL_LOGS_EXPORTER='otlp'",
+          "$env:OTEL_EXPORTER_OTLP_LOGS_PROTOCOL='http/protobuf'",
+          `$env:OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${telemetryPsQuote(endpoint)}`,
+          "$env:OTEL_LOG_USER_PROMPTS='0'",
+          "$env:OTEL_LOG_ASSISTANT_RESPONSES='0'",
+          "$env:OTEL_LOG_TOOL_DETAILS='0'",
+          "$env:OTEL_LOG_TOOL_CONTENT='0'",
+          "$env:OTEL_LOG_RAW_API_BODIES='0'",
+          "& $cli.Source",
+        ]).join("; ");
+      }
+      if (provider === "grok") {
+        return telemetryWindowsCli(["grok.cmd", "grok.exe"]).concat([
+          "$env:GROK_EXTERNAL_OTEL='1'",
+          "$env:OTEL_LOGS_EXPORTER='otlp'",
+          "$env:OTEL_EXPORTER_OTLP_LOGS_PROTOCOL='http/protobuf'",
+          `$env:OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=${telemetryPsQuote(endpoint)}`,
+          "$env:OTEL_LOG_USER_PROMPTS='0'",
+          "$env:OTEL_LOG_TOOL_DETAILS='0'",
+          "& $cli.Source",
+        ]).join("; ");
+      }
+      const endpointFlag = telemetryPsQuote(
+        `otel.exporter."otlp-http".endpoint=${endpoint}`
+      );
+      const protocolFlag = telemetryPsQuote(
+        'otel.exporter."otlp-http".protocol=binary'
+      );
+      return telemetryWindowsCli(["codex.cmd", "codex.exe"]).concat([
+        `& $cli.Source --config otel.exporter=otlp-http --config ${endpointFlag} --config ${protocolFlag} --config otel.log_user_prompt=false`,
+      ]).join("; ");
+    }
+
+    function telemetrySetupHtml(provider) {
+      if (state.telemetrySetup !== provider) return "";
+      const copied = state.telemetryCopied === provider;
+      const receiver = state.telemetry && state.telemetry.receiver;
+      const providerEnabled = receiver && receiver.providers?.[provider] === true;
+      const canDisable = receiver && receiver.manageable === true && providerEnabled;
+      return `<div class="telemetry-setup" id="telemetry-${esc(provider)}-setup">
+        <p class="telemetry-setup-title">${esc(t("telemetrySetupTitle", { provider: NAMES[provider] }))}</p>
+        <p>${esc(t("telemetrySetupIntro"))}</p>
+        <code class="telemetry-command">${esc(telemetryCommand(provider))}</code>
+        <p>${esc(t("telemetryRestart"))}</p>
+        <div class="telemetry-actions">
+          <button type="button" data-act="telemetry-copy" data-provider="${esc(provider)}">${esc(t(copied ? "telemetryCopied" : "telemetryCopy"))}</button>
+          <button type="button" data-act="telemetry-check">${esc(t("telemetryCheck"))}</button>
+          ${canDisable ? `<button type="button" data-act="telemetry-disable" data-provider="${esc(provider)}">${esc(t("telemetryDisableProvider"))}</button>` : ""}
+        </div>
+      </div>`;
+    }
+
+    function telemetryHtml(provider) {
+      const row = ((state.telemetry && state.telemetry.providers) || [])
+        .find(item => item.provider === provider);
+      if (!row) return "";
+      const noteId = `telemetry-${provider}-note`;
+      const last = telemetryTime(row.last_received_at);
+      const receiver = state.telemetry && state.telemetry.receiver;
+      const hasProviderControl = Boolean(
+        receiver && receiver.manageable === true && receiver.providers
+        && Object.prototype.hasOwnProperty.call(receiver.providers, provider)
+      );
+      const providerEnabled = hasProviderControl ? receiver.providers[provider] === true : true;
+      let label = hasProviderControl
+        ? t(providerEnabled ? "telemetryProviderEnabled" : "telemetryProviderOff", { provider: NAMES[provider] })
+        : t("telemetryWaiting", { provider: NAMES[provider] });
+      let note = hasProviderControl && !providerEnabled
+        ? t("telemetryProviderOffNote", { provider: NAMES[provider] })
+        : t("telemetryReadyNote", { provider: NAMES[provider] });
+      if (receiver && receiver.state === "disabled") {
+        label = t("telemetryReceiverOff");
+        note = t("telemetryReceiverOffNote");
+      } else if (receiver && receiver.state === "error") {
+        label = t("telemetryReceiverError");
+        note = t("telemetryReceiverErrorNote");
+      } else if (hasProviderControl && !providerEnabled) {
+        label = t("telemetryProviderOff", { provider: NAMES[provider] });
+        note = t("telemetryProviderOffNote", { provider: NAMES[provider] });
+      } else if (row.state === "traffic_only") {
+        label = t("telemetryTraffic");
+        note = t("telemetryTrafficNote", { provider: NAMES[provider], time: last });
+      } else if (row.state === "usage_only") {
+        label = t("telemetryUsageOnly");
+        note = t("telemetryUsageOnlyNote", { provider: NAMES[provider], time: last });
+      } else if (row.state === "identity_observed") {
+        label = t("telemetryIdentity", { count: row.attributed_records });
+        note = t("telemetryIdentityNote", { provider: NAMES[provider], time: last });
+      }
+      const open = state.telemetrySetup === provider;
+      const receiverDisabled = receiver && receiver.state === "disabled";
+      // The OTLP listener is shared, but each provider is an independent
+      // switch. A click changes only this provider's persisted flag.
+      const enabling = state.telemetryEnabling === provider;
+      const enableAction = hasProviderControl && (!providerEnabled || receiverDisabled)
+        ? `<button type="button" class="telemetry-enable" data-act="telemetry-enable" data-provider="${esc(provider)}"${enabling ? " disabled" : ""}>${esc(t(enabling ? "telemetryEnabling" : "telemetryEnable"))}</button>`
+        : "";
+      return `<div class="history-help telemetry-help ${esc(row.state)} ${esc(provider)}${open ? " open" : ""}">
+        <div class="telemetry-status-row"><button type="button" class="history-label telemetry-trigger" data-act="telemetry-toggle" data-provider="${esc(provider)}" aria-expanded="${open ? "true" : "false"}" aria-controls="telemetry-${esc(provider)}-setup" aria-describedby="${esc(noteId)}"><i class="telemetry-dot" aria-hidden="true"></i>${esc(label)}</button>${enableAction}</div>
+        <p class="history-note" id="${esc(noteId)}" role="tooltip">${esc(note)}</p>
+        ${telemetrySetupHtml(provider)}
+      </div>`;
+    }
+
+    function updateBadgeHtml() {
+      // Same condition as the banner: nothing at all until a release actually
+      // offers something. It is the only thing up here that is not muted, and
+      // that is what makes it read as an offer rather than a control that has
+      // always been there.
+      const offer = state.update;
+      if (!offer || !offer.version) return "";
+      const icon = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><g class="badge-arrow"><path d="M9 4v6.6"/><path d="m6.9 8.5 2.1 2.1 2.1-2.1"/></g><path d="M4.9 13.9h8.2"/></svg>`;
+      return `<button type="button" class="update-badge" data-act="update-badge" aria-label="${esc(t("updateTitle", { version: offer.version }))}" aria-controls="update-banner" aria-expanded="${state.updateBanner ? "true" : "false"}">${icon}</button>`;
+    }
+
+    function updateBannerHtml() {
+      // Nothing until a release actually offers something. A permanent "you are
+      // up to date" line is a notification that never means anything, and this
+      // one has to mean something the moment it appears.
+      const offer = state.update;
+      if (!offer || !offer.version) return "";
+      // The badge carries the fact that there is an offer; this carries what
+      // accepting it does -- the app quits and comes back -- which the user
+      // should be able to read before clicking, not after.
+      if (!state.updateBanner) return "";
+      const label = state.updateApplying ? t("updateApplying") : t("updateApply");
+      const note = state.updateError
+        ? `<div class="muted">${esc(t("updateFailed"))}</div>`
+        : "";
+      return `<div class="update-banner" role="status">
+        <div class="grow"><strong>${esc(t("updateTitle", { version: offer.version }))}</strong>${esc(t("updateCopy"))}${note}</div>
+        <button type="button" class="update-apply" data-act="apply-update"${state.updateApplying ? " disabled" : ""}>${esc(label)}</button>
+      </div>`;
+    }
+
+    async function loadUpdate() {
+      try {
+        const response = await fetch("/api/update");
+        if (!response.ok) return;
+        const offer = await response.json();
+        state.update = offer && offer.version ? offer : null;
+      } catch (_) {
+        state.update = null;
+      }
+      render();
+    }
+
+    async function applyUpdate() {
+      if (state.updateApplying || !state.update) return;
+      state.updateApplying = true;
+      state.updateError = "";
+      render();
+      try {
+        const response = await fetch("/api/update/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ offer: state.update }),
+        });
+        const result = response.ok ? await response.json() : { ok: false };
+        if (result.ok) return;          // the panel is closing; leave it disabled
+        state.updateError = String(result.error || "failed");
+      } catch (_) {
+        state.updateError = "failed";
+      }
+      state.updateApplying = false;
+      render();
+    }
+
+    function runtimeWarningHtml() {
+      const components = (state.diagnostics && state.diagnostics.components) || {};
+      const issues = Object.values(components);
+      const issue = issues.find((item) => item && item.status === "blocked_by_application_control") || issues[0];
+      if (!issue) return "";
+      const blocked = issue.status === "blocked_by_application_control";
+      return `<div class="runtime-warning" role="status"><strong>${esc(t(blocked ? "runtimeBlockedTitle" : "runtimeComponentTitle"))}</strong>${esc(t(blocked ? "runtimeBlockedCopy" : "runtimeComponentCopy"))}</div>`;
+    }
+
+    function capability(provider, name) {
+      return (((state.providers || {})[provider] || {})[name]) || {};
+    }
+
+    function hasLocalUsageEvidence() {
+      return ["claude", "codex", "grok"].some(provider => capability(provider, "local_usage").available === true);
+    }
+
+    function localSyncHtml() {
+      if (state.localRetrying) {
+        return `<div class="local-sync" role="status" aria-live="polite"><span>${esc(t("localUsageRetrying"))}</span><button type="button" disabled>${esc(t("retry"))}</button></div>`;
+      }
+      if (state.loadingLocal && !state.localWindows.length) {
+        return `<div class="local-sync" role="status" aria-live="polite"><span>${esc(t("localUsageLoading"))}</span></div>`;
+      }
+      if (!state.localError) return "";
+      return `<div class="local-sync is-error" role="alert"><span>${esc(t("localUsageUnavailable"))}</span><button type="button" data-act="local-retry">${esc(t("retry"))}</button></div>`;
+    }
+
+    function providerCard(acc, compact) {
+      const p = acc.provider;
+      const meters = metersHtml(acc);
+      const activity = compact ? "" : activityHtml(acc);
+      const list = compact ? "" : accountListHtml(p, acc);
+      const unassigned = compact ? "" : unassignedHtml(p);
+      const telemetry = compact ? "" : telemetryHtml(p);
+      const history = !compact && p === "grok" && !unassigned
+        ? `<div class="history-help">
+            <span class="history-label" tabindex="0" aria-describedby="grok-history-note">${esc(t("unassignedInfo"))}</span>
+            <p class="history-note" id="grok-history-note" role="tooltip">${esc(t("grokHistory"))}</p>
+          </div>`
+        : "";
+      const hasDetails = windowsOf(acc).length || activity || list || unassigned || history || telemetry;
+      return `${headerHtml(acc, compact)}
+        ${hasDetails ? `<div class="rule"></div>` : ""}
+        <div class="stack">${meters}</div>
+        ${compact ? "" : localSyncHtml()}
+        ${list}
+        ${unassigned}
+        ${history}
+        ${telemetry}
+        ${activity ? `<div class="rule mid"></div>${activity}` : ""}`;
+    }
+
+    function overviewPickerHtml() {
+      if (!state.overviewPicker) return "";
+      const shown = new Set(selectedOverviewIds());
+      const groups = ["codex", "claude", "grok"].map(provider => {
+        const live = loggedIn(provider);
+        const accounts = monitoredAccounts(provider)
+          .slice()
+          .sort((a, b) => {
+            if (live && a.account_id === live.account_id) return -1;
+            if (live && b.account_id === live.account_id) return 1;
+            return lastUsedMs(b) - lastUsedMs(a);
+          });
+        if (!accounts.length) return "";
+        const rows = accounts.map(a => {
+          const key = accountKey(a);
+          const who = identity(a) || a.account_id;
+          const isCurrent = !!(live && live.account_id === a.account_id);
+          const isShown = shown.has(key);
+          const statuses = [
+            isCurrent ? `<span class="current">${esc(t("currentLogin"))}</span>` : "",
+            isShown ? `<span>${esc(t("shownOnOverview"))}</span>` : "",
+          ].join("");
+          const aria = isShown
+            ? t("shownAccountAria", { provider: NAMES[provider], account: who })
+            : t("addAccountAria", { provider: NAMES[provider], account: who });
+          return `<button type="button" data-act="overview-add" data-id="${esc(key)}" aria-label="${esc(aria)}"${isShown ? " disabled" : ""}>
+            <span class="who">${esc(who)}</span>
+            <span class="overview-account-status">${statuses}</span>
+          </button>`;
+        }).join("");
+        return `<section class="overview-provider-group ${esc(provider)}">
+          <div class="overview-provider-head"><span class="logo ${esc(provider)}" aria-hidden="true"></span><span>${esc(NAMES[provider])}</span><span class="count">${accounts.length}</span></div>
+          ${rows}
+        </section>`;
+      }).join("");
+      return `<div class="overview-picker" role="region" tabindex="-1" aria-label="${esc(t("selectAccount"))}">${groups || `<div class="overview-empty">${esc(t("noAccountsFound"))}</div>`}</div>`;
+    }
+
+    function overviewOnboardingHtml() {
+      if (!state.productMode.selected) {
+        return `<section class="overview-onboarding">
+          <span class="logo sandglass" aria-hidden="true"></span>
+          <h2>${esc(t("modeTitle"))}</h2>
+          <p>${esc(t("modeCopy"))}</p>
+          <div class="onboarding-mode-options">
+            <button type="button" class="onboarding-mode" data-act="mode-single"><strong>${esc(t("modeSingleTitle"))}</strong><span>${esc(t("modeSingleCopy"))}</span></button>
+            <button type="button" class="onboarding-mode" data-act="mode-skill"><strong>${esc(t("modeSkillTitle"))}</strong><span>${esc(t("modeSkillCopy"))}</span></button>
+          </div>
+          ${state.productModeBeforeEdit ? `<button type="button" class="overview-secondary" data-act="mode-cancel">${esc(t("modeCancel"))}</button>` : ""}
+        </section>`;
+      }
+      if (state.overviewScan === "scanning") {
+        return `<section class="overview-onboarding" aria-live="polite">
+          <span class="logo sandglass" aria-hidden="true"></span>
+          <h2>${esc(t("scanningTitle"))}</h2>
+          <p>${esc(t("scanningCopy"))}</p>
+          <button type="button" class="overview-primary" disabled>${esc(t("scanning"))}</button>
+        </section>`;
+      }
+      if (state.overviewScan === "done") {
+        const count = state.accounts.length;
+        if (count) {
+          return `<section class="overview-onboarding" aria-live="polite">
+            <span class="logo sandglass" aria-hidden="true"></span>
+            <h2>${esc(t("scanComplete"))}</h2>
+            <p class="scan-result">${esc(t("foundAccounts", { count }))}</p>
+            <p>${esc(t("chooseOverview"))}</p>
+            <button type="button" class="overview-primary" data-act="overview-guide-add">${esc(t("addAccount"))}</button>
+          </section>`;
+        }
+        const repeated = state.overviewEmptyScans > 1;
+        return `<section class="overview-onboarding" aria-live="polite">
+          <span class="logo sandglass" aria-hidden="true"></span>
+          <h2>${esc(t(repeated ? "stillNoAccounts" : "noAccountsFound"))}</h2>
+          <p>${esc(t("discoveryBoundary"))}</p>
+          <p>${esc(t("loginThenScan"))}</p>
+          <button type="button" class="overview-primary" data-act="overview-scan">${esc(t("rescan"))}</button>
+        </section>`;
+      }
+      if (state.overviewScan === "error") {
+        return `<section class="overview-onboarding" aria-live="polite">
+          <span class="logo sandglass" aria-hidden="true"></span>
+          <h2>${esc(t("scanFailed"))}</h2>
+          <p>${esc(t("serviceUnavailable"))}</p>
+          <button type="button" class="overview-primary" data-act="overview-scan">${esc(t("rescan"))}</button>
+        </section>`;
+      }
+      return `<section class="overview-onboarding">
+        <span class="logo sandglass" aria-hidden="true"></span>
+        <h2>${esc(t("onboardingTitle"))}</h2>
+        <p>${esc(t("onboardingCopy"))}</p>
+        <button type="button" class="overview-primary" data-act="overview-scan">${esc(t("scanAccounts"))}</button>
+      </section>`;
+    }
+
+    function overviewRestoringHtml() {
+      return `<div class="skel" aria-label="${esc(t("refreshing"))}">
+        <div class="sk t"></div><div class="sk s"></div><div class="rule"></div>
+        <div class="sk h"></div><div class="sk bar"></div><div class="sk s"></div>
+        <div class="sk h"></div><div class="sk bar"></div>
+      </div>`;
+    }
+
+    function overviewHtml() {
+      if (!state.productModeLoaded) {
+        return `<div class="overview-head"><h1>${esc(t("overview"))}</h1></div><div class="overview-cards">${overviewRestoringHtml()}</div>`;
+      }
+      if (state.productModeError && !state.productMode.selected && !state.productModeBeforeEdit) {
+        return `<div class="overview-head"><h1>${esc(t("overview"))}</h1></div><div class="overview-cards">
+          <section class="overview-onboarding" aria-live="polite">
+            <span class="logo sandglass" aria-hidden="true"></span>
+            <h2>${esc(t("scanFailed"))}</h2>
+            <p>${esc(t("serviceUnavailable"))}</p>
+            <button type="button" class="overview-primary" data-act="mode-reload">${esc(t("rescan"))}</button>
+          </section>
+        </div>`;
+      }
+      if (!state.productMode.selected) {
+        return `<div class="overview-head"><h1>${esc(t("overview"))}</h1></div><div class="overview-cards">${overviewOnboardingHtml()}</div>`;
+      }
+      const accounts = selectedOverviewAccounts();
+      const nextMode = state.overviewMode === "default" ? "custom" : "default";
+      const modeTip = `${t("overviewDisplayMode")} · ${t(state.overviewMode === "default" ? "overviewDefaultMode" : "overviewCustomMode")} → ${t(nextMode === "default" ? "overviewDefaultMode" : "overviewCustomMode")}`;
+      const defaultModeLabel = t("overviewDefaultMode").replace(/\s*模式$/u, "");
+      const customModeLabel = t("overviewCustomMode").replace(/\s*模式$/u, "");
+      const restoring = selectedOverviewIds().length > 0 && !state.lastOkAt;
+      const cards = accounts.map(acc => {
+        const who = identity(acc) || acc.account_id;
+        return `<div class="ov${state.overviewMode === "custom" ? " removable" : ""}">
+          ${state.overviewMode === "custom" ? `<div class="overview-card-actions"><button type="button" class="overview-remove" data-act="overview-remove" data-id="${esc(accountKey(acc))}" aria-label="${esc(t("removeAccountAria", { provider: NAMES[acc.provider], account: who }))}" title="${esc(t("removeAccountAria", { provider: NAMES[acc.provider], account: who }))}">×</button></div>` : ""}
+          ${providerCard(acc, true)}
+        </div>`;
+      }).join("");
+      const canAdd = state.overviewMode === "custom" && monitoredAccounts().length > 0;
+      const canRescan = state.accounts.length > 0;
+      return `<div class="overview-head">
+        <button type="button" class="overview-mode-toggle" data-act="overview-mode" data-mode="${nextMode}" data-current="${state.overviewMode}" aria-label="${esc(modeTip)}" title="${esc(modeTip)}" aria-pressed="${state.overviewMode === "custom"}"><span class="mode-option"><span class="mode-label">${esc(defaultModeLabel)}</span></span><span class="mode-option"><span class="mode-label">${esc(customModeLabel)}</span></span></button>
+        <div class="overview-actions">
+          ${canRescan ? `<button type="button" class="overview-rescan" data-act="overview-scan"${state.overviewScan === "scanning" ? " disabled" : ""}>${esc(t(state.overviewScan === "scanning" ? "scanningEllipsis" : "rescan"))}</button>` : ""}
+          ${canAdd ? `<button type="button" class="overview-add" data-act="overview-toggle" aria-expanded="${state.overviewPicker ? "true" : "false"}">${esc(t("addAccountButton"))}</button>` : ""}
+        </div>
+        ${state.overviewScanNotice ? `<div class="overview-notice" aria-live="polite">${esc(state.overviewScanNotice)}</div>` : ""}
+        ${overviewPickerHtml()}
+      </div>
+      ${localSyncHtml()}
+      <div class="overview-cards">${cards || (restoring ? overviewRestoringHtml() : overviewOnboardingHtml())}</div>`;
+    }
+
+    function sizeOverviewCards() {
+      const wrap = document.querySelector(".overview-cards");
+      if (!wrap) return;
+      const cards = Array.from(wrap.querySelectorAll(".ov"));
+      wrap.classList.toggle("scroll", cards.length > 5);
+      wrap.style.maxHeight = "";
+      if (cards.length > 5) {
+        const top = wrap.getBoundingClientRect().top;
+        const bottom = cards[4].getBoundingClientRect().bottom;
+        wrap.style.maxHeight = `${Math.ceil(bottom - top)}px`;
+      }
+    }
+
+    function menuRow(act, icon, label, extra) {
+      return `<button type="button" data-act="${esc(act)}"><span class="ico">${icon}</span><span class="grow">${esc(label)}</span>${extra || ""}</button>`;
+    }
+
+    function menuHtml() {
+      return menuRow("refresh", MENU_ICO.refresh, t("refresh"), `<span class="hint">Ctrl+R</span>`);
+    }
+
+    function helpHtml() {
+      const sections = [
+        ["helpStayLocalTitle", "helpStayLocalCopy"],
+        ["helpReadOnlyTitle", "helpReadOnlyCopy"],
+        ["helpCoverageTitle", "helpCoverageCopy"],
+        ["helpBillingTitle", "helpBillingCopy"],
+      ].map(([title, copy]) => `<section class="help-section"><h2>${esc(t(title))}</h2><p>${esc(t(copy))}</p></section>`).join("");
+      const advanced = `<div class="help-advanced${state.helpAdvanced ? " open" : ""}">
+        <button type="button" class="help-advanced-toggle" data-act="help-advanced" aria-expanded="${state.helpAdvanced ? "true" : "false"}"${state.helpAdvanced ? ' aria-controls="help-advanced-body"' : ""}>${esc(t("helpAdvancedTitle"))}</button>
+        ${state.helpAdvanced ? `<div class="help-advanced-body" id="help-advanced-body">
+          <p>${esc(t("helpAdvancedCopy"))}</p>
+          <button type="button" class="help-action${state.adapterSkillCopied ? " is-copied" : ""}" data-act="adapter-skill-copy">${esc(t(state.adapterSkillCopied ? "helpSkillCopied" : "helpSkillCopy"))}</button>
+          <p class="help-advanced-next">${esc(t("helpAdvancedNext"))}</p>
+        </div>` : ""}
+      </div>`;
+      return `<div class="help-view" role="region" tabindex="-1" aria-label="${esc(t("helpTitle"))}"><div class="head"><div class="row"><h1><span class="name">${esc(t("helpTitle"))}</span></h1></div></div><div class="help-sections">${sections}</div>${advanced}</div>`;
+    }
+
+    function adapterSkillPrompt() {
+      return t("helpSkillAgentPrompt");
+    }
+
+    function appMenuHtml() {
+      const icon = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 5h12M3 9h12M3 13h12"/></svg>`;
+      const helpIcon = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M6.6 6.2A1.6 1.6 0 0 1 8.2 4.8c1 0 1.8.7 1.8 1.6 0 1.4-2 1.5-2 3"/><path d="M8 11.8h.01"/></svg>`;
+      const modeIcon = `<svg class="menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 5h10M3 11h10"/><circle cx="6" cy="5" r="1.4"/><circle cx="10" cy="11" r="1.4"/></svg>`;
+      const chevronIcon = `<svg class="menu-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>`;
+      const options = I18N.options.map(option => {
+        const selected = option.id === state.locale;
+        return `<button type="button" class="language-option" data-act="language" data-locale="${esc(option.id)}" role="menuitemradio" aria-checked="${selected ? "true" : "false"}"><span class="check">${selected ? "✓" : ""}</span><span>${esc(option.label)}</span></button>`;
+      }).join("");
+      const currentLanguage = I18N.options.find(option => option.id === state.locale)?.label || state.locale;
+      const languageOptions = state.languageOptions
+        ? `<div class="app-menu-options" role="group" aria-label="${esc(t("language"))}">${options}</div>`
+        : "";
+      return `<button type="button" class="app-menu-button" data-act="app-menu" aria-label="${esc(t("menu"))}" aria-haspopup="menu" aria-controls="app-menu-panel" aria-expanded="${state.appMenu ? "true" : "false"}">${icon}</button>${updateBadgeHtml()}
+        ${state.appMenu ? `<div class="app-menu-panel" id="app-menu-panel" role="menu" aria-label="${esc(t("menu"))}"><button type="button" class="app-menu-item" data-act="help-open" role="menuitem">${helpIcon}<span>${esc(t("help"))}</span></button><button type="button" class="app-menu-item" data-act="mode-change" role="menuitem">${modeIcon}<span>${esc(t("modeChange"))}</span></button><div class="app-menu-divider" aria-hidden="true"></div><button type="button" class="app-menu-item language-toggle" data-act="language-toggle" role="menuitem" aria-haspopup="true" aria-expanded="${state.languageOptions ? "true" : "false"}"><span class="grow">${esc(t("languageOptions"))}</span><span class="menu-value">${esc(currentLanguage)}</span>${chevronIcon}</button>${languageOptions}</div>` : ""}`;
+    }
+
+    function revealSelectedLanguage() {
+      const list = document.querySelector(".app-menu-options");
+      const selected = list && list.querySelector('[aria-checked="true"]');
+      if (!list || !selected) return;
+      const top = selected.offsetTop - list.offsetTop;
+      const bottom = top + selected.offsetHeight;
+      if (top < list.scrollTop) list.scrollTop = top;
+      else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+    }
+
+    function focusAppMenuButton() {
+      document.querySelector('[data-act="app-menu"]')?.focus();
+    }
+
+    function focusFirstAppMenuItem() {
+      document.querySelector('#app-menu-panel [role^="menuitem"]')?.focus();
+    }
+
+    function focusActiveTab() {
+      document.querySelector(`[data-tab="${state.tab}"]`)?.focus();
+    }
+
+    function focusHelpView() {
+      document.querySelector(".help-view")?.focus();
+    }
+
+    function focusOverviewPicker() {
+      const picker = document.querySelector(".overview-picker");
+      if (!picker) return;
+      (picker.querySelector('button:not([disabled])') || picker).focus();
+    }
+
+    function focusOverviewPickerOpener() {
+      document.querySelector(
+        '[data-act="overview-toggle"], [data-act="overview-guide-add"]',
+      )?.focus();
+    }
+
+    function openOverviewPicker() {
+      state.overviewPicker = true;
+      render();
+      requestAnimationFrame(focusOverviewPicker);
+    }
+
+    function closeOverviewPickerAndRestoreFocus() {
+      state.overviewPicker = false;
+      render();
+      requestAnimationFrame(focusOverviewPickerOpener);
+    }
+
+    function closeAppMenuAndRestoreFocus() {
+      state.appMenu = false;
+      render();
+      requestAnimationFrame(focusAppMenuButton);
+    }
+
+    function tabMark(t) {
+      if (t === "overview") return `<span class="mark"></span>`;
+      const acc = loggedIn(t);
+      const win = acc ? tightest(acc) : null;
+      if (!win) return `<span class="mark ${esc(t)}"></span>`;
+      const fill = fillWidth(win);
+      const color = getComputedStyle(document.documentElement).getPropertyValue("--" + t).trim() || "#888";
+      return `<span class="mark ${esc(t)}"><i style="--fill:${(fill / 100).toFixed(4)};background:${esc(color)}"></i></span>`;
+    }
+
+    function renderTabs() {
+      const tabs = ["overview", "codex", "claude", "grok"];
+      document.getElementById("tabs").innerHTML = tabs.map(provider => {
+        const label = provider === "overview" ? t("overview") : NAMES[provider];
+        const on = state.tab === provider ? " on" : "";
+        const icon = `<span class="logo ${provider === "overview" ? "sandglass" : provider}"></span>`;
+        return `<button type="button" data-tab="${provider}" class="${on}" aria-label="${esc(label)}" aria-current="${on ? "page" : "false"}" title="${esc(label)}">${icon}<span class="tab-label">${esc(label)}</span>${tabMark(provider)}</button>`;
+      }).join("");
+    }
+
+    function renderCard() {
+      const card = document.getElementById("card");
+      const menu = document.getElementById("menu");
+      const accountScrollTop = card.querySelector(".accs")?.scrollTop || 0;
+      if (state.help) {
+        card.innerHTML = helpHtml();
+        menu.innerHTML = menuRow("help-back", MENU_ICO.back, t("back"));
+        return;
+      }
+      if (state.tab === "overview") {
+        card.innerHTML = overviewHtml();
+        menu.innerHTML = menuHtml();
+        requestAnimationFrame(sizeOverviewCards);
+        return;
+      }
+      if (state.hardError && !state.accounts.length) {
+        card.innerHTML = navigator.onLine === false
+          ? `<div class="empty"><p class="empty-title">${esc(t("offlineTitle"))}</p><p class="empty-copy">${esc(t("offlineCopy"))}</p></div>`
+          : `<div class="empty"><p class="empty-title">${esc(t("quotaUnavailableTitle"))}</p><p class="empty-copy">${esc(t("quotaUnavailableCopy"))}</p></div>`;
+        menu.innerHTML = menuHtml();
+        return;
+      }
+      if (!state.accounts.length) {
+        const p = state.tab;
+        if (capability(p, "local_usage").available === true) {
+          card.innerHTML = `<div class="head"><div class="row"><h1><span class="logo ${esc(p)}" aria-hidden="true"></span><span class="name">${esc(NAMES[p])}</span></h1></div><div class="row"><span class="sub">${esc(t("signedOut"))}</span></div></div>
+            <div class="empty"><p class="empty-title">${esc(t("providerNoLoginTitle"))}</p><p class="empty-copy">${esc(t("providerNoLoginCopy"))}</p></div>
+            ${unassignedHtml(p)}
+            ${telemetryHtml(p)}`;
+          menu.innerHTML = menuHtml();
+          return;
+        }
+        card.innerHTML = state.loadingQuota
+          ? `<div class="skel" aria-hidden="true"><div class="sk t"></div><div class="sk s"></div><div class="rule"></div><div class="sk h"></div><div class="sk bar"></div><div class="sk s"></div><div class="sk h"></div><div class="sk bar"></div></div>`
+          : state.overviewScan === "idle" && !state.lastOkAt
+            ? `<div class="empty"><p class="empty-title">${esc(t("notScannedTitle"))}</p><p class="empty-copy">${esc(t("notScannedCopy"))}</p></div>`
+            : `<div class="empty"><p class="empty-title">${esc(t("noLocalLoginTitle"))}</p><p class="empty-copy">${esc(t("noLocalLoginCopy"))}</p></div>`;
+        menu.innerHTML = menuHtml();
+        return;
+      }
+
+      const p = state.tab;
+      const acc = viewed(p);
+      if (!acc) {
+        card.innerHTML = `<div class="head"><div class="row"><h1><span class="logo ${esc(p)}" aria-hidden="true"></span><span class="name">${esc(NAMES[p])}</span></h1></div><div class="row"><span class="sub">${esc(t("signedOut"))}</span></div></div>
+          <div class="empty"><p class="empty-title">${esc(t("providerNoLoginTitle"))}</p><p class="empty-copy">${esc(t("providerNoLoginCopy"))}</p></div>
+          ${unassignedHtml(p)}
+          ${telemetryHtml(p)}`;
+        menu.innerHTML = menuHtml();
+        return;
+      }
+      card.innerHTML = providerCard(acc, false);
+      const accountScroller = card.querySelector(".accs");
+      if (accountScroller) accountScroller.scrollTop = accountScrollTop;
+      menu.innerHTML = menuHtml();
+    }
+
+    function render() {
+      if (!["overview", "codex", "claude", "grok"].includes(state.tab)) state.tab = "overview";
+      if (state.productModeLoaded && !state.productMode.selected) {
+        state.tab = "overview";
+        state.help = false;
+      }
+      applyLocale();
+      document.documentElement.classList.toggle("overview-mode", state.tab === "overview" && !state.help);
+      document.body.classList.toggle("overview-mode", state.tab === "overview" && !state.help);
+      document.getElementById("app-menu").innerHTML = appMenuHtml();
+      document.getElementById("update-banner").innerHTML = updateBannerHtml();
+      document.getElementById("runtime-warning").innerHTML = runtimeWarningHtml();
+      document.getElementById("autostart-nudge").innerHTML = autostartNudgeHtml();
+      renderTabs();
+      renderCard();
+    }
+    function renderTabChange() {
+      if (renderTabChange.timer) clearTimeout(renderTabChange.timer);
+      render();
+      const targets = [document.getElementById("card"), document.getElementById("menu")];
+      for (const target of targets) {
+        target.classList.remove("tab-enter");
+        void target.offsetWidth;
+        target.classList.add("tab-enter");
+      }
+      renderTabChange.timer = setTimeout(() => {
+        targets.forEach(target => target.classList.remove("tab-enter"));
+        renderTabChange.timer = 0;
+      }, 220);
+    }
+
+    function clearAccountListMotionTimer() {
+      if (accountListMotionTimer) {
+        clearTimeout(accountListMotionTimer);
+        accountListMotionTimer = null;
+      }
+    }
+
+    function toggleAccountList() {
+      clearAccountListMotionTimer();
+      const open = !state.switcher;
+      state.switcher = open;
+      state.monitorPickerProvider = "";
+      if (!open) revertView(state.tab);
+      const motion = reduceMotion ? "" : open ? "opening" : "closing";
+      state.accountListMotion = motion;
+      render();
+      if (open) {
+        state.accountListMotion = "";
+        if (motion) {
+          accountListMotionTimer = setTimeout(() => {
+            accountListMotionTimer = null;
+          }, 260);
+        }
+      } else if (motion) {
+        accountListMotionTimer = setTimeout(() => {
+          accountListMotionTimer = null;
+          state.accountListMotion = "";
+          render();
+        }, 220);
+      } else {
+        state.accountListMotion = "";
+      }
+    }
+
+    async function loadQuota(onboarding) {
+      if (state.loadingQuota && !onboarding) return;
+      const previousAccountKeys = new Set(state.accounts.map(accountKey));
+      const hadOverviewCards = selectedOverviewAccounts().length > 0;
+      const scanController = new AbortController();
+      const scanTimeout = setTimeout(() => scanController.abort(), 20000);
+      if (onboarding) {
+        state.overviewScan = "scanning";
+        setOverviewNotice("");
+      }
+      const seq = ++state.quotaSeq;
+      state.loadingQuota = true;
+      const prevLogin = loginIds();
+      render();
+      try {
+        const response = await fetch("/api/quota", { signal: scanController.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (seq !== state.quotaSeq) return;
+        if (!data || !Array.isArray(data.accounts)) throw new Error("invalid quota payload");
+        state.accounts = data.accounts;
+        state.providers = data.providers || {};
+        followLoginChange(prevLogin);
+        state.lastOkAt = Date.now();
+        state.stale = false;
+        state.hardError = false;
+        if (onboarding) {
+          state.overviewScan = "done";
+          state.overviewEmptyScans = state.accounts.length ? 0 : state.overviewEmptyScans + 1;
+          if (hadOverviewCards) {
+            const newlyFound = state.accounts.filter(a => !previousAccountKeys.has(accountKey(a))).length;
+            setOverviewNotice(newlyFound
+              ? t("foundNewAccounts", { count: newlyFound })
+              : t("noNewAccounts"));
+            if (newlyFound) state.overviewPicker = true;
+          }
+        }
+      } catch (e) {
+        if (seq !== state.quotaSeq) return;
+        if (state.accounts.length) state.stale = true;
+        else state.hardError = true;
+        if (onboarding) {
+          state.overviewScan = "error";
+          if (hadOverviewCards) setOverviewNotice(t("scanRetryNotice"));
+        }
+      } finally {
+        if (scanTimeout) clearTimeout(scanTimeout);
+        if (seq !== state.quotaSeq) return;
+        state.loadingQuota = false;
+        render();
+        if (state.accounts.length || hasLocalUsageEvidence()) {
+          const quotaMoved = state.accounts.some((acc) => {
+            const at = Date.parse(acc.quota_fetched_at || "");
+            return Number.isFinite(at) && at > state.localAt;
+          });
+          refreshUsageData(quotaMoved);
+        }
+        loadTelemetry(false);
+        if (onboarding && state.overviewScan === "done") startPoll();
+      }
+    }
+
+    function waitFor(ms) {
+      return new Promise(resolve => window.setTimeout(resolve, ms));
+    }
+
+    function loadLocalWindows(force, userInitiated = false) {
+      if (!force && state.localWindows.length && Date.now() - state.localAt < 30000) {
+        return Promise.resolve(true);
+      }
+      if (localLoadPromise) return localLoadPromise;
+      state.loadingLocal = true;
+      state.localRetrying = userInitiated;
+      render();
+      localLoadPromise = (async () => {
+        const delays = [700, 1800];
+        for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 15000);
+          try {
+            const response = await fetch("/api/local-windows", { signal: controller.signal });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            if (!data || !Array.isArray(data.accounts)) throw new Error("invalid local usage payload");
+            state.localWindows = data.accounts;
+            state.localAt = Date.now();
+            state.localError = false;
+            return true;
+          } catch (e) {
+            if (attempt === delays.length) {
+              state.localError = true;
+              return false;
+            }
+            await waitFor(delays[attempt]);
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        }
+        return false;
+      })().finally(() => {
+        state.loadingLocal = false;
+        state.localRetrying = false;
+        localLoadPromise = null;
+        render();
+      });
+      return localLoadPromise;
+    }
+
+    async function refreshUsageData(force, userInitiated = false) {
+      await loadLocalWindows(force, userInitiated);
+      await loadReport(force);
+    }
+
+    async function loadReport(force) {
+      if (state.loadingReport) return;
+      if (!force && state.report && Date.now() - state.reportAt < 60000) return;
+      state.loadingReport = true;
+      render();
+      try {
+        const response = await fetch("/api/report?since=30d");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!data || typeof data !== "object") throw new Error("invalid report payload");
+        state.report = data;
+        state.reportAt = Date.now();
+      } catch (e) {
+      } finally {
+        state.loadingReport = false;
+        render();
+      }
+    }
+
+    async function loadTelemetry(force) {
+      if (state.loadingTelemetry) return;
+      if (!force && state.telemetry && Date.now() - state.telemetryAt < 20000) return;
+      state.loadingTelemetry = true;
+      try {
+        const response = await fetch("/api/telemetry-status");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.telemetry = await response.json();
+        state.telemetryAt = Date.now();
+      } catch (e) {
+      } finally {
+        state.loadingTelemetry = false;
+        render();
+      }
+    }
+
+    async function loadRuntimeDiagnostics() {
+      try {
+        const response = await fetch("/api/runtime-diagnostics");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.diagnostics = await response.json();
+      } catch (e) {
+      } finally {
+        render();
+      }
+    }
+
+    function dismissFloatingMenus(ev) {
+      let changed = false;
+      if (state.appMenu && !ev.__sandglassAppMenuAction && !ev.target.closest(".app-menu-shell") && !ev.target.closest('[data-act="app-menu"]')) {
+        state.appMenu = false;
+        state.languageOptions = false;
+        changed = true;
+      }
+      const opensOverviewPicker = ev.target.closest(
+        '[data-act="overview-toggle"], [data-act="overview-guide-add"]',
+      );
+      if (state.overviewPicker && !ev.target.closest(".overview-picker") && !opensOverviewPicker) {
+        state.overviewPicker = false;
+        changed = true;
+      }
+      const opensMonitorPicker = ev.target.closest('[data-act="monitor-add-toggle"]');
+      if (state.monitorPickerProvider && !ev.target.closest(".monitor-picker") && !opensMonitorPicker) {
+        state.monitorPickerProvider = "";
+        changed = true;
+      }
+      if (state.telemetrySetup && !ev.target.closest(".telemetry-help")) {
+        state.telemetrySetup = "";
+        state.telemetryCopied = "";
+        changed = true;
+      }
+      if (changed) render();
+    }
+
+    document.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0) return;
+      const interactive = ev.target.closest("button,a,input,select,textarea,label,[role='button'],[data-act],[data-tab]");
+      if (!interactive) dismissFloatingMenus(ev);
+    }, true);
+
+    document.querySelector(".popover").addEventListener("click", (ev) => {
+      const tabBtn = ev.target.closest("[data-tab]");
+      const act = ev.target.closest("[data-act]");
+      if (act && act.closest(".app-menu-shell")) ev.__sandglassAppMenuAction = true;
+      const action = act && act.getAttribute("data-act");
+      if (action === "apply-update") {
+        applyUpdate();
+        return;
+      }
+      if (action === "update-badge") {
+        state.updateBanner = !state.updateBanner;
+        state.appMenu = false;
+        state.languageOptions = false;
+        render();
+        return;
+      }
+      if (tabBtn) {
+        state.help = false;
+        if (state.tab !== tabBtn.getAttribute("data-tab")) revertView(state.tab);
+        clearAccountListMotionTimer();
+        state.accountListMotion = "";
+        state.tab = tabBtn.getAttribute("data-tab");
+        state.switcher = false;
+        state.monitorPickerProvider = "";
+        state.telemetrySetup = "";
+        writeStore("sandglass.ui.tab", state.tab);
+        renderTabChange();
+        requestAnimationFrame(focusActiveTab);
+        return;
+      }
+      if (!act) return;
+      const kind = action;
+      if (kind === "app-menu") {
+        state.appMenu = !state.appMenu;
+        if (state.appMenu) state.overviewPicker = false;
+        else state.languageOptions = false;
+        render();
+        if (state.appMenu) requestAnimationFrame(() => {
+          revealSelectedLanguage();
+          focusFirstAppMenuItem();
+        });
+        else requestAnimationFrame(focusAppMenuButton);
+      } else if (kind === "language-toggle") {
+        state.languageOptions = !state.languageOptions;
+        render();
+        requestAnimationFrame(() => document.querySelector('[data-act="language-toggle"]')?.focus());
+      } else if (kind === "help-open") {
+        state.appMenu = false;
+        state.languageOptions = false;
+        state.help = true;
+        state.helpAdvanced = false;
+        renderTabChange();
+        requestAnimationFrame(focusHelpView);
+      } else if (kind === "help-advanced") {
+        state.helpAdvanced = !state.helpAdvanced;
+        renderTabChange();
+        requestAnimationFrame(() => document.querySelector('[data-act="help-advanced"]')?.focus());
+      } else if (kind === "mode-change") {
+        state.appMenu = false;
+        state.languageOptions = false;
+        state.help = false;
+        state.productModeError = false;
+        state.productModeBeforeEdit = { ...state.productMode };
+        state.productMode = { selected: false, attribution_mode: "", skill_required: false };
+        state.tab = "overview";
+        renderTabChange();
+      } else if (kind === "mode-reload") {
+        loadProductMode().then(() => {
+          if (state.productMode.selected) {
+            loadQuota();
+            startPoll();
+          }
+        });
+      } else if (kind === "mode-cancel") {
+        if (state.productModeBeforeEdit) state.productMode = state.productModeBeforeEdit;
+        state.productModeBeforeEdit = null;
+        renderTabChange();
+      } else if (kind === "help-back") {
+        state.help = false;
+        state.helpAdvanced = false;
+        renderTabChange();
+        requestAnimationFrame(focusAppMenuButton);
+      } else if (kind === "adapter-skill-copy") {
+        const done = () => {
+          state.adapterSkillCopied = true;
+          renderTabChange();
+          window.setTimeout(() => {
+            state.adapterSkillCopied = false;
+            if (state.help) renderTabChange();
+          }, 1800);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(adapterSkillPrompt()).then(done).catch(() => {});
+        }
+      } else if (kind === "language") {
+        const locale = I18N.resolve(act.getAttribute("data-locale"));
+        state.locale = locale;
+        state.appMenu = false;
+        state.languageOptions = false;
+        setOverviewNotice("");
+        writeStore("sandglass.ui.language", locale);
+        render();
+        requestAnimationFrame(focusAppMenuButton);
+      } else if (kind === "polarity") {
+        state.polarity = state.polarity === "left" ? "used" : "left";
+        writeStore("sandglass.ui.polarity", state.polarity);
+        render();
+      } else if (kind === "reset") {
+        state.resetMode = state.resetMode === "countdown" ? "clock" : "countdown";
+        writeStore("sandglass.ui.reset", state.resetMode);
+        render();
+      } else if (kind === "activity-range") {
+        const range = act.getAttribute("data-range");
+        if (["all", "30", "7"].includes(range)) {
+          state.activityRange = range;
+          writeStore("sandglass.ui.activityRange", range);
+          render();
+        }
+      } else if (kind === "refresh") {
+        loadQuota();
+        refreshUsageData(true);
+        loadTelemetry(true);
+        loadRuntimeDiagnostics();
+      } else if (kind === "local-retry") {
+        refreshUsageData(true, true);
+      } else if (kind === "telemetry-toggle") {
+        const provider = act.getAttribute("data-provider");
+        state.telemetrySetup = state.telemetrySetup === provider ? "" : provider;
+        state.telemetryCopied = "";
+        render();
+      } else if (kind === "telemetry-enable") {
+        const provider = act.getAttribute("data-provider");
+        if (!provider || state.telemetryEnabling) return;
+        state.telemetryEnabling = provider;
+        state.telemetrySetup = provider;
+        state.telemetryCopied = "";
+        render();
+        ensureTelemetryReceiver(provider).then(() => {
+          state.telemetryEnabling = "";
+          loadTelemetry(true);
+          render();
+        }).catch(() => {
+          state.telemetryEnabling = "";
+          loadTelemetry(true);
+          render();
+        });
+      } else if (kind === "telemetry-copy") {
+        const provider = act.getAttribute("data-provider");
+        ensureTelemetryReceiver().then((ready) => {
+          if (!ready) {
+            loadTelemetry(true);
+            return;
+          }
+          return navigator.clipboard.writeText(telemetryCommand(provider));
+        }).then((copied) => {
+          if (copied === undefined && state.telemetry && state.telemetry.receiver && state.telemetry.receiver.state !== "ready") return;
+          state.telemetryCopied = provider;
+          if (telemetryCopyTimer) clearTimeout(telemetryCopyTimer);
+          telemetryCopyTimer = setTimeout(() => {
+            state.telemetryCopied = "";
+            render();
+          }, 1600);
+          render();
+        }).catch(() => {});
+      } else if (kind === "telemetry-check") {
+        loadTelemetry(true);
+      } else if (kind === "telemetry-disable") {
+        disableTelemetryReceiver(act.getAttribute("data-provider") || "").catch(() => {});
+      } else if (kind === "switch") {
+        toggleAccountList();
+      } else if (kind === "pick") {
+        const id = act.getAttribute("data-id");
+        const live = loggedIn(state.tab);
+        if (live && id === live.account_id) revertView(state.tab);
+        else state.chosen[state.tab] = id;
+        render();
+      } else if (kind === "overview-toggle") {
+        setOverviewNotice("");
+        if (state.overviewPicker) closeOverviewPickerAndRestoreFocus();
+        else openOverviewPicker();
+      } else if (kind === "overview-mode") {
+        const mode = act.getAttribute("data-mode");
+        if (mode === "default" || mode === "custom") {
+          if (mode === "custom") startOverviewCustomizing();
+          state.overviewMode = mode;
+          state.overviewPicker = false;
+          writeStore("sandglass.ui.overviewMode", mode);
+          render();
+        }
+      } else if (kind === "overview-scan") {
+        state.overviewPicker = false;
+        loadQuota(true);
+      } else if (kind === "mode-single") {
+        chooseProductMode("single_official");
+      } else if (kind === "mode-skill") {
+        chooseProductMode("skill_assisted");
+      } else if (kind === "overview-guide-add") {
+        openOverviewPicker();
+      } else if (kind === "overview-add") {
+        startOverviewCustomizing();
+        setOverviewNotice("");
+        const id = act.getAttribute("data-id");
+        if (id && !state.overviewIds.includes(id)) state.overviewIds.push(id);
+        saveOverviewIds();
+        state.overviewPicker = false;
+        render();
+        requestAnimationFrame(focusOverviewPickerOpener);
+      } else if (kind === "overview-remove") {
+        startOverviewCustomizing();
+        const id = act.getAttribute("data-id");
+        state.overviewIds = state.overviewIds.filter(key => key !== id);
+        saveOverviewIds();
+        render();
+      } else if (kind === "monitor-add-toggle") {
+        const provider = act.getAttribute("data-provider") || "";
+        state.monitorPickerProvider = state.monitorPickerProvider === provider ? "" : provider;
+        state.overviewPicker = false;
+        render();
+      } else if (kind === "monitor-cancel") {
+        const id = act.getAttribute("data-id");
+        if (id && !state.hiddenMonitorIds.includes(id)) state.hiddenMonitorIds.push(id);
+        writeListStore("sandglass.ui.hiddenMonitorAccounts", state.hiddenMonitorIds);
+        if (state.overviewIds) {
+          state.overviewIds = state.overviewIds.filter(key => key !== id);
+          saveOverviewIds();
+        }
+        for (const provider of Object.keys(state.chosen)) {
+          if (`${provider}:${state.chosen[provider]}` === id) delete state.chosen[provider];
+        }
+        render();
+      } else if (kind === "monitor-restore") {
+        const id = act.getAttribute("data-id");
+        state.hiddenMonitorIds = state.hiddenMonitorIds.filter(key => key !== id);
+        writeListStore("sandglass.ui.hiddenMonitorAccounts", state.hiddenMonitorIds);
+        state.monitorPickerProvider = "";
+        render();
+      } else if (kind === "autostart-enable") {
+        enableDesktopAutostart();
+      } else if (kind === "autostart-later") {
+        state.autostartPromptDismissed = true;
+        sessionStorage.setItem("sandglass.ui.autostartDismissed", "1");
+        render();
+      }
+    });
+    document.addEventListener("click", dismissFloatingMenus);
+    document.addEventListener("keydown", (ev) => {
+      const menuItem = ev.target.closest('#app-menu-panel [role^="menuitem"]');
+      if (state.appMenu && menuItem && ["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) {
+        ev.preventDefault();
+        const options = Array.from(document.querySelectorAll('#app-menu-panel [role^="menuitem"]'));
+        const current = options.indexOf(menuItem);
+        let next = current;
+        if (ev.key === "ArrowDown") next = (current + 1) % options.length;
+        else if (ev.key === "ArrowUp") next = (current - 1 + options.length) % options.length;
+        else if (ev.key === "Home") next = 0;
+        else if (ev.key === "End") next = options.length - 1;
+        options[next]?.focus();
+        options[next]?.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (ev.key === "Escape" && state.appMenu && state.languageOptions) {
+        ev.preventDefault();
+        state.languageOptions = false;
+        render();
+        requestAnimationFrame(() => document.querySelector('[data-act="language-toggle"]')?.focus());
+        return;
+      }
+      if (ev.key === "Escape" && state.appMenu) {
+        ev.preventDefault();
+        closeAppMenuAndRestoreFocus();
+        return;
+      }
+      if (ev.key === "Escape" && state.help) {
+        ev.preventDefault();
+        state.help = false;
+        renderTabChange();
+        requestAnimationFrame(focusAppMenuButton);
+        return;
+      }
+      if (ev.key === "Escape" && state.overviewPicker) {
+        ev.preventDefault();
+        closeOverviewPickerAndRestoreFocus();
+        return;
+      }
+      if (ev.key === "Escape" && state.telemetrySetup) {
+        ev.preventDefault();
+        state.telemetrySetup = "";
+        state.telemetryCopied = "";
+        render();
+        return;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "r") {
+        ev.preventDefault();
+        loadQuota();
+        refreshUsageData(true, true);
+        loadTelemetry(true);
+        loadRuntimeDiagnostics();
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && (state.lastOkAt || selectedOverviewIds().length)) loadQuota();
+    });
+    const POLL_MS = 20000;
+    let poll = null;
+    let stampTick = null;
+    function startPoll() {
+      if (poll) clearInterval(poll);
+      poll = setInterval(loadQuota, POLL_MS);
+      if (!stampTick) stampTick = setInterval(paintStamps, 1000);
+    }
+    render();
+    loadUpdate();
+    loadProductMode().then(() => {
+      if (state.productMode.selected) {
+        loadQuota();
+        startPoll();
+      }
+    });
+    loadTelemetry(false);
+    loadRuntimeDiagnostics();
+    window.addEventListener("pywebviewready", loadDesktopAutostart);
+    setTimeout(loadDesktopAutostart, 250);
+  </script>
+</body>
+</html>
