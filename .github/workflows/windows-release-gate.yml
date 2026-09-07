@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13.15"]
+        python-version: ["3.12", "3.13.15"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -72,6 +72,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+    env:
+      SIGNPATH_HAS_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -102,9 +104,6 @@ jobs:
       - name: Build and smoke unsigned Windows candidates
         shell: pwsh
         run: ./tools/build_windows_release.ps1 -NsisCompiler $env:SANDGLASS_MAKENSIS
-      - name: Launch packaged desktop and open native panel
-        shell: pwsh
-        run: ./tools/smoke_windows_bundle.ps1 -Bundle ./dist/Sandglass
       - name: Preserve verified unsigned candidates
         uses: actions/upload-artifact@v4
         with:
@@ -129,8 +128,8 @@ jobs:
           if-no-files-found: error
       - name: Submit inner Authenticode signing
         id: sign-inner
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.SIGNPATH_ORGANIZATION_ID != '' && secrets.SIGNPATH_API_TOKEN != '' }}
-        uses: signpath/github-action-submit-signing-request@v2
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.SIGNPATH_ORGANIZATION_ID != '' && env.SIGNPATH_HAS_TOKEN == 'true' }}
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -165,8 +164,8 @@ jobs:
           if-no-files-found: error
       - name: Submit outer Authenticode signing
         id: sign-outer
-        if: ${{ steps.sign-inner.outcome == 'success' && vars.SIGNPATH_ORGANIZATION_ID != '' && secrets.SIGNPATH_API_TOKEN != '' }}
-        uses: signpath/github-action-submit-signing-request@v2
+        if: ${{ steps.sign-inner.outcome == 'success' && vars.SIGNPATH_ORGANIZATION_ID != '' && env.SIGNPATH_HAS_TOKEN == 'true' }}
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}

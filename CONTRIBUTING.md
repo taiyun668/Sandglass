@@ -18,7 +18,7 @@ outside the Sandglass public product.
 
 ## Development checks
 
-Use Python 3.10 or newer. From the repository root:
+Use Python 3.12 or newer. From the repository root:
 
 ```powershell
 python -m unittest discover -s tests

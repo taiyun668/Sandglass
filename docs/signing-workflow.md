@@ -55,8 +55,10 @@ Open Source Code Signing requires a SignPath project linked to the GitHub
 trusted build system with origin verification. `.github/workflows/windows-release-gate.yml`
 builds the unsigned bundle on `windows-latest`, exports `Uninstall.exe`,
 uploads `Sandglass/` plus that uninstaller as a GitHub Actions artifact, and
-calls `signpath/github-action-submit-signing-request@v2` only on `main` when
-the following are set:
+calls `signpath/github-action-submit-signing-request` pinned to the `v2`
+commit SHA only on `main` when the following are set. The token gate is
+`env.SIGNPATH_HAS_TOKEN`, filled from `secrets.SIGNPATH_API_TOKEN != ''` at
+job scope: a step `if` cannot read `secrets`.
 
 - GitHub Actions secret `SIGNPATH_API_TOKEN`
 - GitHub Actions variables `SIGNPATH_ORGANIZATION_ID`,

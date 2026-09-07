@@ -1182,11 +1182,24 @@ class SelfSampledIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
             accounts, "meter_home", lambda: Path(tmp)
         ), mock.patch.object(
+            accounts, "grok_home", lambda: Path(tmp) / "grok"
+        ), mock.patch.object(
             accounts.tempfile, "NamedTemporaryFile", no_space
         ), mock.patch(
             "sandglass.diagnostics.record_component_failure",
             lambda name, exc: recorded.append(name),
         ):
+            grok_logs = Path(tmp) / "grok" / "logs"
+            grok_logs.mkdir(parents=True)
+            (grok_logs / "unified.jsonl").write_text(
+                json.dumps({
+                    "ts": "2026-09-01T00:00:00Z",
+                    "msg": "auth init user_info check",
+                    "ctx": {"user_id": "grok-user-1"},
+                })
+                + "\n",
+                encoding="utf-8",
+            )
             (Path(tmp) / "grok-official-identity-runs.json").write_text(
                 "[]", encoding="utf-8"
             )
@@ -1195,7 +1208,7 @@ class SelfSampledIdentityTests(unittest.TestCase):
             accounts._GROK_RUNS = accounts._GROK_RUNS_SRC = None
 
         self.assertEqual(recorded, ["grok_identity_merge_write"])
-        self.assertIsInstance(rows, list)
+        self.assertEqual([account for _, account in rows], ["grok-user-1"])
 
     def test_corrupt_identity_ledger_is_never_replaced_by_a_new_run(self):
         from sandglass import accounts

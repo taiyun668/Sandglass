@@ -90,7 +90,7 @@ Sandglass 自己的缓存、额度快照和归属台账写在 `%LOCALAPPDATA%\sa
 
 ## 运行
 
-需要 Python 3.10+。核心仅额外依赖 OpenTelemetry 官方生成的 protobuf
+需要 Python 3.12+。核心仅额外依赖 OpenTelemetry 官方生成的 protobuf
 消息类型，用于接收厂商客户端主动发送的 OTLP 日志。
 
 当前尚未发布可下载的 wheel 或安装包，只能从源码 checkout 运行：
@@ -164,7 +164,7 @@ pythonw sandglass-desktop.pyw
 
 | 部分 | 当前范围 |
 | --- | --- |
-| 核心 CLI 与浏览器面板 | 以 Python 3.10+ 的 Windows、macOS、Linux 为目标；实际可见内容仍取决于相应官方客户端是否在本机写下受支持信源 |
+| 核心 CLI 与浏览器面板 | 以 Python 3.12+ 的 Windows、macOS、Linux 为目标；实际可见内容仍取决于相应官方客户端是否在本机写下受支持信源 |
 | 悬浮球、托盘和原生桌面面板 | Windows x64 |
 | 当前发布与干净机器验收 | Windows x64；macOS 与 Linux 桌面工件尚未验收 |
 

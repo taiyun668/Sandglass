@@ -141,10 +141,15 @@ def _win32_probe(final_target: str) -> tuple[bool, str, str]:
 
 
 def state_home_attestation(*, path: Path | None = None, diagnostic: bool = False) -> dict[str, object]:
-    """Measure whether this process writes to its lexical Sandglass state home.
+    """Measure whether this process's writes land in its Sandglass state home.
 
     The cache contains only successful results. Failure is measured again on
     every call so a transient API result cannot turn into an unsafe pass.
+
+    A junction or directory symlink the user pointed the state home through
+    is not a failure: other processes opening that same path see the same
+    files. AppContainer copy-on-write is: CreateFileW of a new file lands in
+    a package store that the spelled path does not name.
     """
     target = path or meter_home()
     spelled = _lexical_path(target)
@@ -188,17 +193,17 @@ def state_home_attestation(*, path: Path | None = None, diagnostic: bool = False
         )
         probe = target / probe_name
         lexical_probe = _lexical_path(probe)
-        result["target_path_sha256"] = _path_hash(_normalise_final_path(lexical_probe))
+        # Resolve the existing parent before creating the probe. Junctions
+        # and directory symlinks are followed; AppContainer write
+        # virtualization of a newly created file is not, because that write
+        # is the CreateFileW below.
+        try:
+            expected_final = str(target.resolve() / probe_name)
+        except OSError:
+            expected_final = lexical_probe
+        result["target_path_sha256"] = _path_hash(_normalise_final_path(expected_final))
         if os.name == "nt":
             probe_ok, landed, probe_reason = _win32_probe(lexical_probe)
-            # This is only a conservative secondary signal. Windows handle
-            # resolution above is authoritative; a disagreement here can
-            # only fail closed and keeps older diagnostic environments that
-            # virtualise Path.resolve visible to the shared measurement.
-            try:
-                lexical_resolved = str(probe.resolve())
-            except OSError:
-                lexical_resolved = _lexical_path(probe)
         else:
             probe.write_bytes(b"")
             try:
@@ -210,11 +215,7 @@ def state_home_attestation(*, path: Path | None = None, diagnostic: bool = False
         result["final_path_sha256"] = _path_hash(_normalise_final_path(landed))
         if not diagnostic:
             result["landed_path"] = landed
-        matches = _normalise_final_path(landed) == _normalise_final_path(lexical_probe)
-        if os.name == "nt" and _normalise_final_path(lexical_resolved) != _normalise_final_path(lexical_probe):
-            matches = False
-            if not diagnostic:
-                result["landed_path"] = lexical_resolved
+        matches = _normalise_final_path(landed) == _normalise_final_path(expected_final)
         result["final_path_matches"] = matches
         result["ok"] = bool(probe_ok and matches)
         result["reason"] = probe_reason if matches else "probe_final_path_mismatch"

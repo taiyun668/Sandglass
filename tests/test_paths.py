@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,8 +21,13 @@ class StateHomeAttestationTests(unittest.TestCase):
         )
 
     def test_success_is_cached_and_diagnostic_is_redacted(self):
+        def fake_probe(spelled):
+            probe = Path(spelled)
+            landed = str(probe.parent.resolve() / probe.name)
+            return True, "\\\\?\\" + landed, "probe_ok"
+
         with tempfile.TemporaryDirectory() as tmp, self._signals()[0], self._signals()[1], patch.object(
-            paths, "_win32_probe", side_effect=lambda target: (True, "\\\\?\\" + target, "probe_ok")
+            paths, "_win32_probe", side_effect=fake_probe
         ) as probe, patch.object(paths.os, "name", "nt"):
             result = paths.state_home_attestation(path=Path(tmp), diagnostic=True)
             again = paths.state_home_attestation(path=Path(tmp), diagnostic=True)
@@ -94,6 +100,25 @@ class StateHomeAttestationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "probe_final_path_mismatch")
         self.assertNotIn(str(other), str(result))
         self.assertTrue(result["final_path_sha256"])
+
+    def test_a_junction_to_the_same_directory_passes(self):
+        if os.name != "nt":
+            self.skipTest("directory junctions are a Windows reparse")
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real"
+            link = Path(tmp) / "link"
+            real.mkdir()
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(real)],
+                capture_output=True,
+                text=True,
+            )
+            if created.returncode != 0:
+                self.skipTest(created.stderr.strip() or created.stdout.strip() or "mklink /J failed")
+            result = paths.state_home_attestation(path=link, diagnostic=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "probe_ok")
+        self.assertEqual(result["target_path_sha256"], result["final_path_sha256"])
 
 
 if __name__ == "__main__":

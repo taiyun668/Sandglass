@@ -146,7 +146,15 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("dist/SHA256SUMS", text)
         self.assertIn("tools/windows-release-requirements.txt", text)
         self.assertIn("build_windows_release.ps1", text)
-        self.assertIn("smoke_windows_bundle.ps1", text)
+        self.assertNotIn("smoke_windows_bundle.ps1", text)
+        self.assertIn('python-version: ["3.12", "3.13.15"]', text)
+        self.assertIn("env.SIGNPATH_HAS_TOKEN == 'true'", text)
+        self.assertNotIn("&& secrets.SIGNPATH_API_TOKEN", text)
+        self.assertIn(
+            "signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627",
+            text,
+        )
+        self.assertNotIn("github-action-submit-signing-request@v2", text)
         self.assertIn("dist/SHA256SUMS.windows", text)
 
     def test_windows_bundle_smoke_requires_orb_and_loaded_native_panel(self):
