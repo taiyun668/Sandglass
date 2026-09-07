@@ -206,6 +206,22 @@ CycloneDX runtime SBOM，并统一写入 `SHA256SUMS.windows`。未通过所有�
 
 修改解析逻辑时必须同步提升 `sandglass.models.RECORD_FORMAT`，避免旧缓存继续返回旧语义。
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/).
+
+- Authors, committers and reviewers: [taiyun668](https://github.com/taiyun668)
+- Signing approver: [taiyun668](https://github.com/taiyun668)
+- Privacy policy: [`PRIVACY.md`](PRIVACY.md)
+
+Windows release binaries are built from this repository's public `main` branch
+on GitHub-hosted Actions runners. Each release signing request requires manual
+approval. Sandglass signs only project-maintained binaries that are produced by
+that build; valid signatures on bundled upstream components are preserved. The
+complete build and signing sequence is documented in
+[`docs/signing-workflow.md`](docs/signing-workflow.md).
+
 ## 许可证
 
 Sandglass 源代码采用 [MIT License](LICENSE)。内置 Geist 字体继续采用
