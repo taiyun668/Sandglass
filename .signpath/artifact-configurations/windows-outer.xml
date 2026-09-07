@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Outer NSIS installer. GitHub Actions wraps the uploaded exe in a ZIP. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Sandglass-*-windows-x64-unsigned-outer-setup.exe" max-matches="1">
+      <authenticode-sign hash-algorithm="sha256"
+                         description="Sandglass"
+                         description-url="https://github.com/taiyun668/Sandglass" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

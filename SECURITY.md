@@ -11,11 +11,10 @@ older versions may be asked to upgrade before a report can be reproduced.
 Do not open a public issue for a vulnerability or attach credentials, provider
 logs, account identifiers or local databases.
 
-The public repository must enable GitHub private vulnerability reporting before
-release. Use the repository Security tab's **Report a vulnerability** action when
-it is available. During the private pre-release period, use the existing private
-channel through which the build was provided. No public security contact address
-has been designated yet; the project will not invent one in documentation.
+Use the repository Security tab's **Report a vulnerability** action. Private
+vulnerability reporting is enabled on `taiyun668/Sandglass`. No separate public
+security contact address has been designated; the project will not invent one
+in documentation.
 
 Useful reports include the affected Sandglass version/commit, Windows and Python
 versions, a minimal reproduction using synthetic data, and the expected impact.

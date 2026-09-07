@@ -3,6 +3,7 @@ name: Windows release gate
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -68,6 +69,9 @@ jobs:
 
   windows-bundle:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -110,4 +114,84 @@ jobs:
             dist/Sandglass-*-windows-x64-unsigned-setup.exe
             dist/Sandglass-*-windows-x64-runtime.cdx.json
             dist/SHA256SUMS.windows
+          if-no-files-found: error
+      - name: Export uninstaller for the inner SignPath request
+        shell: pwsh
+        run: ./tools/prepare_windows_signing.ps1 -NsisCompiler $env:SANDGLASS_MAKENSIS
+      - name: Upload inner unsigned signing payload
+        id: upload-inner-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandglass-windows-inner-unsigned-${{ github.sha }}
+          path: |
+            dist/Sandglass
+            build/windows-signing-request/Uninstall.exe
+          if-no-files-found: error
+      - name: Submit inner Authenticode signing
+        id: sign-inner
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.SIGNPATH_ORGANIZATION_ID != '' && secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: windows-inner
+          github-artifact-id: ${{ steps.upload-inner-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-inner
+          wait-for-completion-timeout-in-seconds: 1800
+      - name: Build unsigned outer installer from signed inner files
+        if: ${{ steps.sign-inner.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:GITHUB_WORKSPACE "signed-inner.zip"
+          if (Test-Path -LiteralPath "signed-inner\Sandglass\Sandglass.exe") {
+            Compress-Archive -Path "signed-inner\Sandglass","signed-inner\Uninstall.exe" `
+              -DestinationPath $archive -Force
+          } else {
+            throw "Signed inner payload is missing Sandglass.exe"
+          }
+          ./tools/build_signed_nsis.ps1 -SignedInnerArchive $archive `
+            -NsisCompiler $env:SANDGLASS_MAKENSIS `
+            -OutputDirectory "build/windows-signed-installer"
+      - name: Upload unsigned outer installer
+        id: upload-outer-unsigned
+        if: ${{ steps.sign-inner.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandglass-windows-outer-unsigned-${{ github.sha }}
+          path: build/windows-signed-installer/Sandglass-*-windows-x64-unsigned-outer-setup.exe
+          if-no-files-found: error
+      - name: Submit outer Authenticode signing
+        id: sign-outer
+        if: ${{ steps.sign-inner.outcome == 'success' && vars.SIGNPATH_ORGANIZATION_ID != '' && secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: windows-outer
+          github-artifact-id: ${{ steps.upload-outer-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-outer
+          wait-for-completion-timeout-in-seconds: 1800
+      - name: Smoke the signed installer
+        if: ${{ steps.sign-outer.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "signed-outer\Sandglass-*-windows-x64-unsigned-outer-setup.exe" |
+            Select-Object -First 1
+          if (-not $installer) {
+            $installer = Get-ChildItem "signed-outer\*.exe" | Select-Object -First 1
+          }
+          if (-not $installer) { throw "Signed outer installer is missing." }
+          ./tools/smoke_windows_installer.ps1 -Installer $installer.FullName -RequireSigned
+      - name: Preserve signed installer
+        if: ${{ steps.sign-outer.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandglass-windows-signed-${{ github.sha }}
+          path: signed-outer
           if-no-files-found: error

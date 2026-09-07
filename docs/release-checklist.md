@@ -5,11 +5,9 @@ privacy or correctness boundary.
 
 ## Where this stands, and what to do next (2026-09-07)
 
-`9e148f9`, working tree clean. Installer smoke passed on this commit. The
-signing gate is open locally: inner SignPath request ZIP prepared from the
-unsigned `9e148f9` bundle (146 PE files, 15 unsigned in the bundle plus
-exported `Uninstall.exe`). No SignPath account, GitHub origin, or signing
-request exists. **672 tests**, isolation exit 0, audit **51/53**. Desktop
+Public origin is `taiyun668/Sandglass` (`92e3f81`). CI now exports the inner
+SignPath payload and will submit only after the Owner sets SignPath variables
+and `SIGNPATH_API_TOKEN`. Private vulnerability reporting is on. Desktop
 left stopped.
 Read this section, then work the open items in the order given;
 everything below it is the evidence, not a second plan.
@@ -25,10 +23,10 @@ clears when the product is restarted from the current checkout. `codex 开账后
    `update.py`'s `download_verified()` refuses any installer Windows does not
    trust, checksum match or not -- so an unsigned build ships with its own
    update path dead from day one. The fail-closed NSIS path and the inner
-   request ZIP from `9e148f9` are ready. Still needed: choose the certificate
-   (SignPath Foundation is the prepared candidate), publish the GitHub origin
-   SignPath requires, then two signing requests -- bundle PE plus uninstaller,
-   then the outer installer -- SHA-256 with a trusted timestamp.
+   request ZIP from `9e148f9` are ready. GitHub origin is public. Still
+   needed: SignPath Foundation application, GitHub App, then the four CI
+   values (`SIGNPATH_API_TOKEN` and the three variables) so main can submit
+   the two signing requests.
 2. **Build and installer smoke on the current tree.** Done 2026-09-07 at
    `9e148f9`, out of container, after the Owner stopped the product.
    `tools/build_windows_release.ps1` exit 0: per-user silent install,
@@ -691,7 +689,8 @@ it as a release blocker, and do not make it green.
 ## P2 - public repository hygiene
 
 - [x] Add CONTRIBUTING, SECURITY, privacy and supported-scope documents.
-- [ ] Enable GitHub private vulnerability reporting when the public repository is created.
+- [x] Enable GitHub private vulnerability reporting when the public repository is created.
+  Enabled 2026-09-07 on `taiyun668/Sandglass`.
 - [x] Pin the exact Geist font source archive/version and complete asset provenance notices.
 - [x] Add provider non-affiliation and unstable-first-party-endpoint notices.
 - [x] Modernize `pyproject.toml` license metadata to SPDX form and remove the current setuptools deprecation warning.
@@ -742,9 +741,10 @@ it as a release blocker, and do not make it green.
   cloud HSM to run -- which puts a manual step inside every release.
   Prerequisites checked, not assumed: `LICENSE` exists and `pyproject.toml`
   declares MIT; `.github/workflows/windows-release-gate.yml` already runs the
-  suite, builds the wheel and writes checksums on `windows-latest`. **There is
-  no git remote at all** -- nothing has ever been pushed -- so publishing is
-  the first action, not a formality.
+  suite, builds the wheel, the unsigned installer, and the inner SignPath
+  payload on `windows-latest`. GitHub origin is
+  `https://github.com/taiyun668/Sandglass`, public, first commit `92e3f81`.
+  Local `main` was not pushed.
   Two things stay the Owner's and neither should be handed to an agent:
   reviewing `docs/` for anything that should not be public before the first
   push, since publication cannot be undone; and the SignPath application
@@ -755,12 +755,13 @@ it as a release blocker, and do not make it green.
   downloads and time, and Smart App Control in enforced mode will still stop an
   unknown publisher at first. The clean-machine item below is where that gets
   measured, not argued.
-  **The CI gap that route creates:** SignPath signs an artifact its CI built,
-  and the release gate above builds a wheel, not the installer. Moving
-  `tools/build_windows_release.ps1` -- or at least the NSIS packaging half --
-  into that workflow, publishing the unsigned installer as a build artifact, is
-  the largest piece an agent can advance without the Owner, and it closes the
-  checksums/SBOM/provenance item at the same time.
+  The unsigned installer is already a CI artifact. The remaining CI half is
+  the inner SignPath payload plus gated submit: done in
+  `.github/workflows/windows-release-gate.yml` with
+  `.signpath/artifact-configurations/windows-inner.xml` and
+  `windows-outer.xml`. Submit stays off until the Owner sets SignPath
+  variables and `SIGNPATH_API_TOKEN`. Private vulnerability reporting is
+  enabled on the public repository.
   - [x] Validate the SignPath Foundation candidate route against enforced Smart
     App Control with a correctly signed, Mark-of-the-Web third-party release.
     This validates the route on the test machine, not Sandglass or SmartScreen
@@ -771,8 +772,10 @@ it as a release blocker, and do not make it green.
     require signed install/uninstall smoke. Inner request ZIP rebuilt
     2026-09-07 from the smoked `9e148f9` bundle:
     `build/windows-signing-request/Sandglass-0.1.0-inner-signing-request.zip`
-    (146 PE files). No SignPath account, token, GitHub origin, or submit
-    exists -- the workflow forbids inventing those.
+    (146 PE files). GitHub origin exists. Submit still waits for the Owner
+    to create the SignPath project and set `SIGNPATH_API_TOKEN` plus the
+    organization/project/policy variables. The workflow forbids inventing
+    those.
 - [ ] Authenticode-sign every shipped executable component, installer and uninstaller with SHA-256 and a trusted timestamp.
 - [ ] Sign update manifests and payloads; reject unsigned or mismatched updates.
 - [ ] Decide whether to register a Microsoft Store developer account and publish an MSIX channel.

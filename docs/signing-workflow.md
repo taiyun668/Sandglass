@@ -1,6 +1,11 @@
 # Windows signing workflow
 
-Status: locally prepared, not connected to SignPath, no signing credentials.
+Status: GitHub origin is public (`taiyun668/Sandglass`). Inner and outer
+SignPath artifact configurations live in
+`.signpath/artifact-configurations/`. CI prepares the inner payload on
+GitHub-hosted `windows-latest` and submits only when
+`SIGNPATH_ORGANIZATION_ID` and `SIGNPATH_API_TOKEN` are set. No SignPath
+account, token or request exists yet.
 
 ## Why the workflow has two signing requests
 
@@ -44,17 +49,26 @@ configuration must distinguish existing valid upstream PE files from unsigned
 files that require the Foundation signature. Re-run the inventory whenever a
 pinned dependency or bundle shape changes.
 
-## Future GitHub/SignPath connection
+## GitHub/SignPath connection
 
-Open Source Code Signing requires a SignPath project linked to the GitHub trusted
-build system with origin verification. The signing workflow must use
-GitHub-hosted runners, upload the unsigned input as a GitHub Actions artifact,
-and pass its artifact ID to
-`signpath/github-action-submit-signing-request@v2`. Organization ID, project
-slug, signing policy slug, artifact configuration slug and API token are external
-configuration and must not be invented or committed.
+Open Source Code Signing requires a SignPath project linked to the GitHub
+trusted build system with origin verification. `.github/workflows/windows-release-gate.yml`
+builds the unsigned bundle on `windows-latest`, exports `Uninstall.exe`,
+uploads `Sandglass/` plus that uninstaller as a GitHub Actions artifact, and
+calls `signpath/github-action-submit-signing-request@v2` only on `main` when
+the following are set:
 
-No SignPath request is authorized until the source repository is intentionally
-published, the project satisfies the Foundation release/maintenance conditions,
-and the owner approves the external connection. A local unsigned build or an
-empty GitHub repository does not satisfy those gates.
+- GitHub Actions secret `SIGNPATH_API_TOKEN`
+- GitHub Actions variables `SIGNPATH_ORGANIZATION_ID`,
+  `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`
+
+Artifact configuration slugs in SignPath must match the files in
+`.signpath/artifact-configurations/`: `windows-inner` then `windows-outer`.
+Do not commit organization IDs or tokens.
+
+A local unsigned ZIP is not an OSS signing input. SignPath signs what
+GitHub-hosted CI built.
+
+Owner remaining: apply to SignPath Foundation, link this repository, install
+the SignPath GitHub App, paste the four values above, then re-run the
+Windows release gate on `main`.

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inner SignPath request: GitHub Actions wraps the uploaded files in a ZIP.
+     Sign only Sandglass PE files that this bundle ships unsigned. Already-valid
+     Microsoft/PSF signatures are omitted so they are preserved, not replaced.
+     Re-run the PE inventory if the unsigned set changes. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Sandglass/Sandglass.exe">
+      <authenticode-sign hash-algorithm="sha256"
+                         description="Sandglass"
+                         description-url="https://github.com/taiyun668/Sandglass" />
+    </pe-file>
+    <pe-file path="Uninstall.exe">
+      <authenticode-sign hash-algorithm="sha256"
+                         description="Sandglass"
+                         description-url="https://github.com/taiyun668/Sandglass" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/_cffi_backend.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/clr_loader/ffi/dlls/amd64/ClrLoader.dll">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/clr_loader/ffi/dlls/x86/ClrLoader.dll">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/google/_upb/_message.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_avif.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_imaging.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_imagingcms.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_imagingft.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_imagingmath.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_imagingtk.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/PIL/_webp.cp313-win_amd64.pyd">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/pythonnet/runtime/Python.Runtime.dll">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/webview/lib/WebBrowserInterop.x64.dll">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+    <pe-file path="Sandglass/_internal/webview/lib/WebBrowserInterop.x86.dll">
+      <authenticode-sign hash-algorithm="sha256" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
