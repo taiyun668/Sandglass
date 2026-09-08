@@ -886,24 +886,42 @@ class CoverageHandoverTests(unittest.TestCase):
         return [row["started_at"] for row in observer._read_coverage()["runs"]]
 
     def test_a_run_erased_by_the_handover_comes_back_on_the_next_beat(self):
-        outgoing = observer._begin_coverage()
-        stale = observer._read_coverage()          # read before the next run exists
-        incoming = observer._begin_coverage()
-        observer._write_coverage(stale)            # written after: the race
-        self.assertNotIn(incoming, self.starts())
+        base = datetime.now(timezone.utc) - timedelta(seconds=1)
+        stamps = [(base + timedelta(microseconds=i)).isoformat() for i in range(3)]
+        with patch.object(
+            observer,
+            "_now",
+            side_effect=stamps,
+        ):
+            outgoing = observer._begin_coverage()
+            stale = observer._read_coverage()          # read before the next run exists
+            incoming = observer._begin_coverage()
+            observer._write_coverage(stale)            # written after: the race
+            self.assertNotEqual(outgoing, incoming)
+            self.assertNotIn(incoming, self.starts())
 
-        observer._heartbeat(incoming)
-        self.assertIn(incoming, self.starts(), "活着的观测器必须把自己的段补回去")
-        self.assertIn(outgoing, self.starts())
+            observer._heartbeat(incoming)
+            self.assertIn(incoming, self.starts(), "活着的观测器必须把自己的段补回去")
+            self.assertIn(outgoing, self.starts())
 
     def test_status_recovers_with_it(self):
-        observer._begin_coverage()
-        stale = observer._read_coverage()
-        incoming = observer._begin_coverage()
-        observer._write_coverage(stale)
-        observer._heartbeat(incoming)
-        status = observer.observer_status()
-        self.assertTrue(status["active"], f"账本应重新反映在跑的观测器：{status}")
+        base = datetime.now(timezone.utc) - timedelta(seconds=1)
+        stamps = [(base + timedelta(microseconds=i)).isoformat() for i in range(3)]
+        with patch.object(
+            observer,
+            "_now",
+            side_effect=stamps,
+        ):
+            outgoing = observer._begin_coverage()
+            stale = observer._read_coverage()
+            incoming = observer._begin_coverage()
+            observer._write_coverage(stale)
+            self.assertNotEqual(outgoing, incoming)
+            observer._heartbeat(incoming)
+            status = observer.observer_status()
+            self.assertTrue(status["active"], f"账本应重新反映在跑的观测器：{status}")
+            self.assertEqual(status["started_at"], incoming)
+            self.assertEqual(status["last_heartbeat_at"], stamps[2])
 
     def test_a_finished_run_is_not_resurrected(self):
         """Only a run still going gets put back; ended means ended."""
