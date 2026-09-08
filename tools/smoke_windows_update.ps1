@@ -9,6 +9,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell normally auto-loads Get-FileHash from this module, but a
+# clean non-interactive -File host on the maintenance machine did not. Make the
+# dependency explicit before the first release-artifact measurement.
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 function Get-FullPath([string]$Path) {
     return [System.IO.Path]::GetFullPath($Path)

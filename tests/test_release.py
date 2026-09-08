@@ -329,6 +329,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
         self.assertIn("[Parameter(Mandatory = $true)]\n    [string]$ExpectedGitCommit", script)
         self.assertIn("Get-FileHash -LiteralPath $oldInstallerPath -Algorithm SHA256", script)
+        self.assertIn("Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop", script)
         self.assertIn("$oldInstallerHash -eq $newInstallerHash", script)
         self.assertIn('$afterDelete = Invoke-Reg "query" $Key', script)
         self.assertIn("Could not prove originally absent registry key", script)
