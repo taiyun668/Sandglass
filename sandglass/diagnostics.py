@@ -11,6 +11,11 @@ from sandglass.paths import meter_home
 
 
 _LOCK = threading.RLock()
+_ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK = threading.Lock()
+_ATTRIBUTION_SELF_CHECK_HEARTBEAT = {
+    "last_ok_at": None,
+    "check_count": 0,
+}
 _BLOCKED_TEXT = (
     "application control policy",
     "blocked by group policy",
@@ -120,8 +125,24 @@ def runtime_diagnostics() -> dict[str, Any]:
     return {
         "updated_at": updated_at,
         "components": components,
+        "attribution_self_check": attribution_self_check_heartbeat(),
         "runtime": runtime_provenance(),
     }
+
+
+def record_attribution_self_check_success() -> None:
+    """Record one successful attribution self-check in process memory only."""
+    with _ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
+        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["last_ok_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["check_count"] += 1
+
+
+def attribution_self_check_heartbeat() -> dict[str, Any]:
+    """Return a snapshot of the in-process attribution self-check heartbeat."""
+    with _ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
+        return dict(_ATTRIBUTION_SELF_CHECK_HEARTBEAT)
 
 
 def _write(components: dict[str, Any]) -> None:

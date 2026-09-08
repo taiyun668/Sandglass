@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import webbrowser
 from functools import partial
@@ -1097,6 +1098,7 @@ _local_cache: dict = {
     "payload": None,
     "identity_stamp": None,
     "source_stamp": None,
+    "inputs": None,
 }
 _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
@@ -1185,34 +1187,51 @@ def _run_evidence(runs: list[tuple[str, str]]) -> dict:
 
 def _disk_run_evidence(path: Path, identity_key: str) -> dict:
     """Describe one exact byte snapshot, bypassing the process identity cache."""
+    snapshot = _read_disk_identity_snapshot(path, identity_key)
+    return snapshot["evidence"]
+
+
+def _read_disk_identity_snapshot(
+    path: Path, identity_key: str, *, codex_v2_only: bool = False
+) -> dict:
+    """Read and validate one identity ledger directly, returning its runs.
+
+    This deliberately does not call the accounts module's cached identity
+    accessors.  ``runs`` is an internal normalized ``(timestamp, owner)``
+    sequence; ``evidence`` retains the non-identifying diagnostics shape used
+    by the existing endpoint.
+    """
     captured_at = datetime.now(timezone.utc).isoformat()
+    path_hash = hashlib.sha256(str(path.resolve()).lower().encode()).hexdigest()
     try:
         with path.open("rb") as handle:
             before = os.fstat(handle.fileno())
             raw = handle.read()
             after = os.fstat(handle.fileno())
     except FileNotFoundError:
-        return {
+        evidence = {
             **_run_evidence([]),
             "readable": True,
             "captured_at": captured_at,
             "file_sha256": hashlib.sha256(b"").hexdigest(),
             "bytes": 0,
             "mtime_ns": 0,
-            "path_sha256": hashlib.sha256(str(path.resolve()).lower().encode()).hexdigest(),
+            "path_sha256": path_hash,
             "stable_snapshot": True,
         }
+        return {"runs": [], "evidence": evidence, "missing": True}
     except OSError:
-        return {
+        evidence = {
             **_run_evidence([]),
             "readable": False,
             "captured_at": captured_at,
             "file_sha256": "",
             "bytes": 0,
             "mtime_ns": 0,
-            "path_sha256": hashlib.sha256(str(path.resolve()).lower().encode()).hexdigest(),
+            "path_sha256": path_hash,
             "stable_snapshot": False,
         }
+        return {"runs": [], "evidence": evidence, "missing": False}
     evidence = {
         "captured_at": captured_at,
         "file_sha256": hashlib.sha256(raw).hexdigest(),
@@ -1228,15 +1247,25 @@ def _disk_run_evidence(path: Path, identity_key: str) -> dict:
     try:
         stored = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return {**_run_evidence([]), "readable": False, **evidence}
+        evidence = {**_run_evidence([]), "readable": False, **evidence}
+        return {"runs": [], "evidence": evidence, "missing": False}
+    if codex_v2_only and not (
+        isinstance(stored, dict)
+        and stored.get("schema") == 2
+        and identity_key == "account_id"
+    ):
+        evidence = {**_run_evidence([]), "readable": False, **evidence}
+        return {"runs": [], "evidence": evidence, "missing": False}
     if isinstance(stored, dict) and stored.get("schema") == 2 and identity_key == "account_id":
         from sandglass.accounts import _valid_codex_identity_events
 
         if not _valid_codex_identity_events(stored):
-            return {**_run_evidence([]), "readable": False, **evidence}
+            evidence = {**_run_evidence([]), "readable": False, **evidence}
+            return {"runs": [], "evidence": evidence, "missing": False}
         events = stored.get("events")
         if not isinstance(events, list):
-            return {**_run_evidence([]), "readable": False, **evidence}
+            evidence = {**_run_evidence([]), "readable": False, **evidence}
+            return {"runs": [], "evidence": evidence, "missing": False}
         runs = [
             (
                 str(item["at"]),
@@ -1249,17 +1278,21 @@ def _disk_run_evidence(path: Path, identity_key: str) -> dict:
         ]
     elif isinstance(stored, list):
         if not _valid_legacy_identity_rows(stored, identity_key):
-            return {**_run_evidence([]), "readable": False, **evidence}
+            evidence = {**_run_evidence([]), "readable": False, **evidence}
+            return {"runs": [], "evidence": evidence, "missing": False}
         runs = [
             (str(item["at"]), str(item[identity_key]))
             for item in stored
         ]
     else:
-        return {**_run_evidence([]), "readable": False, **evidence}
+        evidence = {**_run_evidence([]), "readable": False, **evidence}
+        return {"runs": [], "evidence": evidence, "missing": False}
     projected = _project_identity_runs(runs)
     if projected is None:
-        return {**_run_evidence([]), "readable": False, **evidence}
-    return {**_run_evidence(projected), "readable": True, **evidence}
+        evidence = {**_run_evidence([]), "readable": False, **evidence}
+        return {"runs": [], "evidence": evidence, "missing": False}
+    evidence = {**_run_evidence(projected), "readable": True, **evidence}
+    return {"runs": projected, "evidence": evidence, "missing": False}
 
 
 def _attribution_diagnostics() -> dict:
@@ -1686,12 +1719,16 @@ def _local_windows_payload(live: bool = True) -> dict:
     the panel fills these in afterwards. Scope differs from the quota bar on purpose --
     the bar counts every device on the account, this counts only this machine.
     """
-    now = time.monotonic()
     from sandglass.accounts import identity_source_stamp
 
-    stamp = identity_source_stamp()
-    source_stamp = _user_identity_source_stamp()
     with _REPORT_LOCK:
+        now = time.monotonic()
+        # The stamp and all inputs are captured under the same lock as the
+        # projection.  A second writer cannot otherwise land an identity event
+        # between the source read and the cache entry that claims to represent
+        # it.
+        stamp = identity_source_stamp()
+        source_stamp = _user_identity_source_stamp()
         cached = _local_cache["payload"]
         if (
             cached is not None
@@ -1731,7 +1768,240 @@ def _local_windows_payload(live: bool = True) -> dict:
         _local_cache["at"] = now
         _local_cache["identity_stamp"] = stamp
         _local_cache["source_stamp"] = source_stamp
+        _local_cache["inputs"] = {
+            "accounts": accounts,
+            "sessions": sessions,
+            "mode": mode,
+        }
         return payload
+
+
+def _attribution_projection(payload: object) -> dict[tuple[str, str, str], dict]:
+    """Return only the stable attribution facts in a local-windows payload."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("accounts"), list):
+        raise RuntimeError("attribution payload is malformed")
+    out: dict[tuple[str, str, str], dict] = {}
+    for account in payload["accounts"]:
+        if not isinstance(account, dict):
+            raise RuntimeError("attribution account row is malformed")
+        provider = str(account.get("provider") or "")
+        account_id = str(account.get("account_id") or "")
+        windows = account.get("windows")
+        if not provider or not account_id or not isinstance(windows, list):
+            raise RuntimeError("attribution account identity is malformed")
+        for window in windows:
+            if not isinstance(window, dict):
+                raise RuntimeError("attribution window is malformed")
+            label = str(window.get("label") or "")
+            usage = window.get("usage")
+            days = window.get("days")
+            if not label or not isinstance(usage, dict) or not isinstance(days, list):
+                raise RuntimeError("attribution window facts are malformed")
+            total = usage.get("total_tokens")
+            if not isinstance(total, int) or isinstance(total, bool):
+                raise RuntimeError("attribution total is malformed")
+            day_values: dict[str, int] = {}
+            for day in days:
+                if not isinstance(day, dict) or not isinstance(day.get("day"), str):
+                    raise RuntimeError("attribution day is malformed")
+                spent = day.get("spent")
+                if not isinstance(spent, int) or isinstance(spent, bool):
+                    raise RuntimeError("attribution day total is malformed")
+                day_values[day["day"]] = spent
+            key = (provider, account_id, label)
+            if key in out:
+                raise RuntimeError("duplicate attribution projection key")
+            out[key] = {"total_tokens": total, "days": day_values}
+    return out
+
+
+def _self_check_window_projection(
+    account, peers: list, sessions: list, cached_window: dict,
+    runs, mode: str,
+) -> dict:
+    """Recompute one window using fixed bounds and the supplied identity runs."""
+    start = parse_ts(cached_window.get("counted_from"))
+    end = parse_ts(cached_window.get("counted_to"))
+    if start is None:
+        raise RuntimeError("cached attribution window has no counted_from")
+    if cached_window.get("counted_to") and end is None:
+        raise RuntimeError("cached attribution window has malformed counted_to")
+    cached_days = cached_window.get("days")
+    if not isinstance(cached_days, list):
+        raise RuntimeError("cached attribution window has no day series")
+    day_keys = [str(item.get("day")) for item in cached_days if isinstance(item, dict)]
+    if len(day_keys) != len(cached_days) or any(not day for day in day_keys):
+        raise RuntimeError("cached attribution window has malformed day keys")
+    known = _known_identities(peers)
+    single_owner = _single_account_id(peers, mode)
+    total = TokenUsage()
+    daily: dict[str, TokenUsage] = {}
+    for session in sessions:
+        if session.provider != account.provider or _double_counted(session):
+            continue
+        if session.timeline is None:
+            moment = parse_ts(session.ended_at) or parse_ts(session.started_at)
+            if (
+                moment is not None
+                and moment >= start
+                and (end is None or moment <= end)
+                and (session.usage.total_tokens or session.usage.calls)
+                and _owns_minute(account, runs, session, moment, known, single_owner)
+            ):
+                total = total.add(session.usage)
+            continue
+        for at, delta in session.timeline:
+            moment = parse_ts(at)
+            if (
+                moment is None
+                or moment < start
+                or (end is not None and moment > end)
+                or not _owns_minute(account, runs, session, moment, known, single_owner)
+            ):
+                continue
+            total = total.add(delta)
+            day = moment.astimezone().date().isoformat()
+            daily[day] = (daily.get(day) or TokenUsage()).add(delta)
+    return {
+        "total_tokens": total.total_tokens,
+        "days": {day: (daily.get(day) or TokenUsage()).total_tokens for day in day_keys},
+    }
+
+
+def _check_attribution_self_check() -> bool:
+    """Compare cached Codex attribution with an independent direct-disk replay."""
+    from sandglass import live_snapshot
+    from sandglass.diagnostics import clear_component_failure, record_component_failure
+    from sandglass.paths import meter_home
+
+    # The observer must never clear a panel's attribution result.  An unset
+    # role is also non-authoritative, as are tests and helper processes.
+    if getattr(live_snapshot, "_ROLE", "") != "panel":
+        return False
+
+    def fail(reason: str) -> bool:
+        record_component_failure("attribution_self_check", RuntimeError(reason))
+        return False
+
+    with _REPORT_LOCK:
+        inputs = _local_cache.get("inputs")
+        cached_payload = _local_cache.get("payload")
+        if cached_payload is None:
+            # A panel that has not produced its first local-windows answer yet
+            # is not an unhealthy attribution result.
+            return False
+        if not isinstance(inputs, dict):
+            return fail("attribution self-check inputs unavailable")
+        try:
+            cached_projection = _attribution_projection(cached_payload)
+        except RuntimeError as exc:
+            return fail(str(exc))
+        codex_targets = {key for key in cached_projection if key[0] == "codex"}
+        if not codex_targets:
+            # This installation has no Codex attribution to verify.  Clear a
+            # stale result from an earlier account state, but do not touch the
+            # disk ledger or manufacture a failure for a non-applicable check.
+            clear_component_failure("attribution_self_check")
+            return True
+
+        path = meter_home() / "codex-official-identity-events-v2.json"
+        snapshot = _read_disk_identity_snapshot(path, "account_id", codex_v2_only=True)
+        evidence = snapshot["evidence"]
+        if snapshot.get("missing") or not evidence.get("readable"):
+            return fail("attribution self-check Codex ledger unavailable")
+        if not evidence.get("stable_snapshot"):
+            return fail("attribution self-check Codex ledger unstable")
+
+        accounts = inputs.get("accounts")
+        sessions = inputs.get("sessions")
+        mode = inputs.get("mode")
+        if not isinstance(accounts, list) or not isinstance(sessions, list) or not isinstance(mode, str):
+            return fail("attribution self-check fixed inputs malformed")
+        fresh_projection = {
+            key: value for key, value in cached_projection.items() if key[0] != "codex"
+        }
+        codex_accounts = [account for account in accounts if account.provider == "codex"]
+        for account in codex_accounts:
+            peers = codex_accounts
+            reference_rows = {
+                key[2]: value
+                for key, value in cached_projection.items()
+                if key[0] == "codex" and key[1] == account.account_id
+            }
+            windows = list(account.extra.get("windows") or [])
+            for window in windows:
+                label = str(window.get("label") or "")
+                if not label:
+                    return fail("attribution self-check window label unavailable")
+                reference = reference_rows.get(label)
+                if reference is None:
+                    # Added windows are a meaningful mismatch.  There is no
+                    # cached bound to reuse, so do not invent a replay result.
+                    return fail("attribution self-check account or window changed")
+                cached_window = None
+                for row in cached_payload["accounts"]:
+                    if row.get("provider") != "codex" or row.get("account_id") != account.account_id:
+                        continue
+                    for candidate in row.get("windows") or []:
+                        if candidate.get("label") == label:
+                            cached_window = candidate
+                            break
+                if cached_window is None:
+                    return fail("attribution self-check account or window changed")
+                fresh_projection[("codex", account.account_id, label)] = (
+                    _self_check_window_projection(
+                        account, peers, sessions, cached_window,
+                        snapshot["runs"], mode,
+                    )
+                )
+            if set(reference_rows) != {
+                str(window.get("label") or "") for window in windows
+            }:
+                return fail("attribution self-check account or window changed")
+        if cached_projection != fresh_projection:
+            return fail("attribution self-check attribution facts disagree")
+        clear_component_failure("attribution_self_check")
+        return True
+
+
+def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thread:
+    """Run the panel-only attribution replay independently of quota polling."""
+    from sandglass import live_snapshot
+    from sandglass.diagnostics import (
+        record_attribution_self_check_success,
+        record_component_failure,
+    )
+
+    def loop() -> None:
+        while not stop.is_set():
+            if getattr(live_snapshot, "_ROLE", "") != "panel":
+                return
+            try:
+                if _check_attribution_self_check():
+                    record_attribution_self_check_success()
+            except Exception as exc:  # noqa: BLE001 - self-check must not kill panel
+                if getattr(live_snapshot, "_ROLE", "") == "panel":
+                    record_component_failure("attribution_self_check", exc)
+            if stop.wait(_SNAPSHOT_WATCH_SECONDS):
+                return
+
+    watcher = threading.Thread(
+        target=loop, name="sandglass-attribution-self-check", daemon=True
+    )
+    watcher.start()
+    return watcher
+
+
+@contextmanager
+def _attribution_self_check_watch_context():
+    """Own a panel self-check watcher for exactly one UI/server lifecycle."""
+    stop = threading.Event()
+    watcher = _start_attribution_self_check_watch(stop)
+    try:
+        yield
+    finally:
+        stop.set()
+        watcher.join()
 
 
 def _cached_report(since: str | None, live_quota: bool = True) -> dict:
@@ -1917,24 +2187,23 @@ def serve(
     print(f"sandglass dashboard on {url}")
     print("Data is read from this computer only. Ctrl+C to stop.")
     stop = threading.Event()
-    local_watch = os.name != "nt"
-    watchers: tuple[threading.Thread, ...] = ()
+    watchers: list[threading.Thread] = []
     if live_quota and os.name == "nt":
         from sandglass.observer import ensure_observer_running
 
         ensure_observer_running()
     elif live_quota:
-        watchers = _start_quota_watch(stop, True)
+        watchers.extend(_start_quota_watch(stop, True))
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
-        httpd.serve_forever()
+        with _attribution_self_check_watch_context():
+            httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
-        if local_watch:
-            stop.set()
-            for watcher in watchers:
-                watcher.join()
+        stop.set()
+        for watcher in watchers:
+            watcher.join()
         httpd.server_close()
     return 0

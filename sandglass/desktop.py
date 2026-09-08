@@ -53,6 +53,7 @@ from sandglass.serve import (
     OtlpHandler,
     api_payload,
     configure_user_source,
+    _attribution_self_check_watch_context,
 )
 from sandglass.resources import SOURCE_ROOT
 from sandglass.runtime_provenance import (
@@ -1549,12 +1550,13 @@ def main() -> int:
         else:
             clear_component_failure("native_panel")
             shell.activate_when_ready()
-            try:
-                shell.native_panel.run()
-            finally:
-                shell.stop_auxiliary()
-                receiver.close()
-                _release_single_instance(lock)
+            with _attribution_self_check_watch_context():
+                try:
+                    shell.native_panel.run()
+                finally:
+                    shell.stop_auxiliary()
+                    receiver.close()
+                    _release_single_instance(lock)
             return 0
     else:
         clear_component_failure("native_panel")
@@ -1585,7 +1587,8 @@ def main() -> int:
 
     clear_component_failure("fallback_panel")
     try:
-        webview.start(**_webview_start_options())
+        with _attribution_self_check_watch_context():
+            webview.start(**_webview_start_options())
     except Exception as exc:
         record_component_failure("fallback_panel", exc)
         raise

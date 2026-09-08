@@ -3,55 +3,48 @@
 This is the ordered release route. A later item must not weaken an earlier source,
 privacy or correctness boundary.
 
-## Where this stands, and what to do next (2026-09-07)
+## Where this stands, and what to do next (2026-09-08)
 
-Public origin is `taiyun668/Sandglass` (`92e3f81`). CI now exports the inner
-SignPath payload and will submit only after the Owner sets SignPath variables
-and `SIGNPATH_API_TOKEN`. Private vulnerability reporting is on. Desktop
-left stopped.
-Read this section, then work the open items in the order given;
-everything below it is the evidence, not a second plan.
+The canonical checkout is `D:\Sandglass`, at `main@4016c7c`; it was verified
+clean before this checklist-only edit, and this worktree now carries only this
+uncommitted checklist change. The verified desktop is still running from that
+checkout; the Owner will stop it after the public sync and immediately before
+the outside build. The public tree is prepared locally as clean
+`public@74917f6`, while `origin/main` is `33961f0`; the prepared public commit
+has not been pushed. No SignPath account, certificate or sponsor exists. Code
+signing is not a release blocker for this preview because the maintainer-signed
+`SHA256SUMS.windows` manifest path exists; the shipped binaries remain unsigned,
+so first-run trust is still an Owner/second-machine acceptance concern.
+
+The current route is the unsigned pre-release `v0.1.0-preview.1`, in this order:
+
+1. Sync and push the flattened public tree from `public`.
+2. Stop the product, then run `tools/build_windows_release.ps1` outside the
+   container from the public commit.
+3. Verify the manifest signature and all five release assets.
+4. Tag and create the GitHub pre-release.
+5. Leave clean-machine acceptance and a real provider-state pass as
+   Owner/second-machine gates.
+
+Read this section, then work the open items in the order given; everything below
+it is the evidence, not a second plan.
 
 **The two audit FAILs are not work items.** `运行本体一致` reports that the
 running product is older code than the tree -- it is doing its job, and it
 clears when the product is restarted from the current checkout. `codex 开账后
 归属` is the known ledger gap; the checklist says do not make it green.
 
-**What blocks a release, in order:**
-
-1. **Code signing. Owner's.** It decides what a first-time user sees --
-   SmartScreen, Smart App Control, and whether the publisher has a name -- and
-   nothing below removes that. It no longer decides whether the update channel
-   works: see the release-manifest signature item under P1. The fail-closed NSIS path and the inner
-   request ZIP from `9e148f9` are ready. GitHub origin is public. Still
-   needed: SignPath Foundation application, GitHub App, then the four CI
-   values (`SIGNPATH_API_TOKEN` and the three variables) so main can submit
-   the two signing requests.
-2. **Build and installer smoke on the current tree.** Done 2026-09-07 at
-   `9e148f9`, out of container, after the Owner stopped the product.
-   `tools/build_windows_release.ps1` exit 0: per-user silent install,
-   post-install launch, running-copy abort, packaged self-test, uninstall,
-   provider-directory byte invariance. Provenance in the log is
-   `9e148f9d0b7c`. This does not sign anything.
-3. **Clean-machine acceptance.** Standard-user install and uninstall; Smart App
-   Control, SmartScreen, WDAC and AppLocker behaviour; tray/orb/panel lifecycle
-   with auto-start opt-in; signed-update recovery, which has to come after (1).
-   None of this can be done on this box.
-4. **One real provider-state pass.** An account switch, a reset or refill, a
-   429. Vendor directories are read-only and none of it is to be manufactured;
-   catch it when it happens.
-5. **Release material.** Checksums, SBOM and reproducible provenance with each
-   GitHub release; turn on private vulnerability reporting when the public
-   repository exists.
-
 **What an agent can advance without the Owner, highest value first:**
 
-- **The long-lived-process attribution drift (P2, 2026-08-30).** The only open
-  correctness question. Three sub-items are fixed and the mechanism is still
-  unlocated. `/api/attribution-diagnostics` exposes non-identifying live-memory
-  and on-disk ledger digests for the next capture; the shape to look for is a
-  running panel counting only post-start Codex minutes while a fresh process on
-  the same ledger recovers the earlier interval.
+- **The long-lived-process attribution drift (P2, 2026-08-30) is a monitored
+  open item, not a release blocker.** Its historical mechanism is still
+  unlocated. A 2026-09-07 restart reproduced the required measurement shape --
+  the quota window began 2,308.611 seconds before the new process -- but both
+  panel and observer recovered the same pre-start Codex total and per-day
+  attribution. Commit `52e5435` now makes the panel compare its frozen Codex
+  `total + days` attribution with a direct-disk v2 replay every 30 seconds and
+  record `attribution_self_check` if they disagree. Provider window timestamps,
+  including their observed one-second jitter, are deliberately not compared.
 - **`test_desktop`'s lost state write.** Eight threads finish, none raises, one
   key is missing. `state_file_lock` is ruled out by measurement and the join
   race is fixed. The wipe-on-unread path is closed (`_load_state` no longer
@@ -742,9 +735,9 @@ it as a release blocker, and do not make it green.
   the workflow doc says there is no account, and fails the other way once there
   is one. Mutation: put the sponsorship line back and it fails
   `['SignPath'] != []`.
-  **The public branch still carries the old wording** -- it is a separate,
-  squashed history and this correction is only on local `main`. Publishing it
-  is the next push.
+  The public branch is a separate, squashed history. It still carried the old
+  wording when this finding was written; the correction was later published
+  without exposing the private maintenance history.
 - [x] The update channel no longer waits on a certificate. `download_verified()`
   required an Authenticode signature Windows trusts, so with no certificate no
   build was installable at all -- and the certificate was blocked behind
@@ -853,7 +846,7 @@ it as a release blocker, and do not make it green.
     from build-only tools; include it in Windows artifact checksums.
   - [x] Ship exact third-party license/notice texts with the Windows bundle;
     hash every text and fail the build on missing or unreviewed components.
-- [ ] Resolve the long-lived-process attribution drift reproduced on 2026-08-30.
+- [ ] Monitor the long-lived-process attribution drift reproduced on 2026-08-30.
   A running source panel counted only post-start Codex minutes while a fresh
   process using the same disk ledger recovered the earlier directly evidenced
   interval. The mechanism remains unlocated; `/api/attribution-diagnostics`
@@ -873,6 +866,23 @@ it as a release blocker, and do not make it green.
     the failure class but does not identify the lost 2026-08-30 process state
     retroactively, so the parent investigation remains open until a real process
     capture or an independently different reproduction closes it.
+  - [x] Add a panel-only self-check that compares the frozen Codex attribution
+    projection with a stable, direct-disk replay of the v2 identity ledger every
+    30 seconds (`52e5435`). The comparison key is provider, account and window;
+    the compared values are only total tokens and per-day totals. It ignores
+    provider window start/end timestamps, reset times, boundary labels and the
+    whole projection digest, so the observed one-second provider boundary jitter
+    cannot manufacture an attribution alarm. A mismatch or an unreadable replay
+    records `attribution_self_check`; agreement clears it. The observer cannot
+    execute or clear this panel result, and the check does not rescan logs or call
+    provider APIs. A formal-checkout restart with a window beginning 2,308.611
+    seconds before process start recovered the same total and days in panel and
+    observer. This is one high-quality negative result, not proof that the
+    historical incident was fixed or that its cause is known.
+  - [x] 2026-09-08: `4016c7c` exposes the in-memory `last_ok_at` and
+    `check_count` heartbeat. The live API advanced `1 -> 2`, then held at
+    `2 -> 2` after the watcher stopped, without writing the diagnostics file.
+    This does not close 564 or make the release ready.
 
 Relevant Microsoft guidance:
 
