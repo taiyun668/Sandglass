@@ -37,6 +37,8 @@ Var UpdateParentPid
 Var UpdateBackup
 Var UpdateStage
 Var UpdateRestartExe
+Var UpdatePhase
+Var UpdateFailureLog
 
 Name "Sandglass"
 OutFile "${ARTIFACTDIR}\${ARTIFACTNAME}.exe"
@@ -98,6 +100,8 @@ Function .onInit
       Abort
     ${EndIf}
     StrCpy $UpdateParentPid $R7
+    StrCpy $UpdateFailureLog "$TEMP\Sandglass-update-$UpdateParentPid.failure.txt"
+    Delete "$UpdateFailureLog"
   ${EndIf}
   ${IfNot} ${RunningX64}
     ${If} $UpdateMode == 1
@@ -122,6 +126,10 @@ Function UpdateInstFilesShow
     ; potentially renamed, so make the progress page non-cancellable.
     GetDlgItem $0 $HWNDPARENT 2
     EnableWindow $0 0
+    ; The InstFiles page is the whole update UI. Close it automatically when
+    ; the section finishes instead of leaving a completed progress window next
+    ; to the relaunched application.
+    SetAutoClose true
     System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r1'
     ${If} $1 != 0
       System::Call 'user32::EnableMenuItem(p r1, i 0xF060, i 0x1)'
@@ -134,6 +142,7 @@ Function WaitForUpdateParent
     Return
   ${EndIf}
   ${If} $UpdateParentPid == ""
+    StrCpy $UpdatePhase "parent-pid"
     Call UpdateFailure
   ${EndIf}
   ; A PID alone is not a synchronization primitive. Open the actual process
@@ -146,13 +155,14 @@ Function WaitForUpdateParent
     ${If} $2 == 87
       Return
     ${EndIf}
+    StrCpy $UpdatePhase "open-parent"
     Call UpdateFailure
   ${EndIf}
   System::Call 'kernel32::WaitForSingleObject(p r0, i 0xFFFFFFFF) i .r1'
   System::Call 'kernel32::CloseHandle(p r0)'
   ${If} $1 != 0
-    SetErrorLevel 20
-    Abort
+    StrCpy $UpdatePhase "wait-parent"
+    Call UpdateFailure
   ${EndIf}
 FunctionEnd
 
@@ -160,6 +170,10 @@ Function UpdateFailure
   ; Update mode has no attended user to dismiss a modal dialog. Restore the
   ; complete old directory when it was moved aside, then start that old copy.
   ${If} $UpdateMode == 1
+    SetOutPath "$TEMP"
+    FileOpen $4 "$UpdateFailureLog" w
+    FileWrite $4 "$UpdatePhase$\r$\n"
+    FileClose $4
     ${If} $UpdateStage != ""
       RMDir /r "$UpdateStage"
     ${EndIf}
@@ -180,7 +194,7 @@ Function UpdateFailure
       ${EndIf}
     ${EndIf}
     SetErrorLevel 20
-    Abort
+    Quit
   ${EndIf}
 FunctionEnd
 
@@ -228,6 +242,7 @@ Section "Sandglass" SecMain
     ; nothing about the detached observer the comment above names as the holder.
     ExecWait '"$R0\Sandglass.exe" --stop' $0
     ${If} $0 != 0
+      StrCpy $UpdatePhase "stop-observer"
       ${If} $UpdateMode == 1
         Call UpdateFailure
       ${ElseIf} ${Silent}
@@ -243,6 +258,7 @@ Section "Sandglass" SecMain
     Call CheckSandglassMutex
     Pop $R1
     ${If} $R1 == "held"
+      StrCpy $UpdatePhase "observer-mutex-held"
       ${If} $UpdateMode == 1
         Call UpdateFailure
       ${ElseIf} ${Silent}
@@ -252,6 +268,7 @@ Section "Sandglass" SecMain
       ${EndIf}
       Abort
     ${ElseIf} $R1 != "free"
+      StrCpy $UpdatePhase "observer-mutex-unknown"
       ${If} $UpdateMode == 1
         Call UpdateFailure
       ${ElseIf} ${Silent}
@@ -270,6 +287,7 @@ Section "Sandglass" SecMain
     Pop $2
     ${If} $1 != 0
       System::Call 'kernel32::CloseHandle(p r1)'
+      StrCpy $UpdatePhase "desktop-mutex-held"
       ${If} $UpdateMode == 1
         Call UpdateFailure
       ${ElseIf} ${Silent}
@@ -280,6 +298,7 @@ Section "Sandglass" SecMain
       Abort
     ${Else}
       ${If} $2 != 2
+        StrCpy $UpdatePhase "desktop-mutex-unknown"
         ${If} $UpdateMode == 1
           Call UpdateFailure
         ${ElseIf} ${Silent}
@@ -294,6 +313,7 @@ Section "Sandglass" SecMain
     ClearErrors
     Rename "$R0\Sandglass.exe" "$R0\Sandglass.exe.replacing"
     ${If} ${Errors}
+      StrCpy $UpdatePhase "executable-locked"
       ${If} $UpdateMode == 1
         Call UpdateFailure
       ${ElseIf} ${Silent}
@@ -318,6 +338,7 @@ Section "Sandglass" SecMain
     ; from leaving a half-new installed directory.
     StrCpy $UpdateStage "$TEMP\Sandglass-update-$UpdateParentPid"
     ${If} ${FileExists} "$UpdateStage\*.*"
+      StrCpy $UpdatePhase "staging-exists"
       Call UpdateFailure
     ${EndIf}
     CreateDirectory "$UpdateStage"
@@ -328,6 +349,7 @@ Section "Sandglass" SecMain
   File /r "${SOURCEDIR}\*"
 
   ${If} ${Errors}
+    StrCpy $UpdatePhase "extract-stage"
     Call UpdateFailure
   ${EndIf}
 
@@ -339,11 +361,13 @@ Section "Sandglass" SecMain
       ${AndIf} ${FileExists} "$R0\Sandglass.exe"
       StrCpy $UpdateBackup "$INSTDIR.update-backup"
       ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
+        StrCpy $UpdatePhase "backup-exists"
         Call UpdateFailure
       ${EndIf}
       ClearErrors
       Rename "$INSTDIR" "$UpdateBackup"
       ${If} ${Errors}
+        StrCpy $UpdatePhase "backup-old"
         Call UpdateFailure
       ${EndIf}
     ${Else}
@@ -351,9 +375,14 @@ Section "Sandglass" SecMain
       ; unrelated non-empty directory chosen by stale external state.
       RMDir "$INSTDIR"
     ${EndIf}
+    ; SetOutPath above made UpdateStage the installer's current directory.
+    ; Windows cannot rename a process's current directory, so leave it before
+    ; atomically activating the fully extracted tree.
+    SetOutPath "$TEMP"
     ClearErrors
     Rename "$UpdateStage" "$INSTDIR"
     ${If} ${Errors}
+      StrCpy $UpdatePhase "activate-new"
       Call UpdateFailure
     ${EndIf}
     StrCpy $UpdateStage ""
@@ -378,6 +407,7 @@ Section "Sandglass" SecMain
     ${If} $UpdateBackup != ""
       RMDir /r "$UpdateBackup"
     ${EndIf}
+    Delete "$UpdateFailureLog"
   ${EndIf}
 
   ; MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws. Without this
@@ -386,6 +416,9 @@ Section "Sandglass" SecMain
   ${If} $UpdateMode == 1
     ; /UPDATE intentionally keeps the InstFiles progress window visible, so it
     ; is not ${Silent}; relaunch explicitly when that page has completed.
+    ; Hide first so the visible order is progress complete, installer gone,
+    ; then the new Sandglass window -- not two overlapping windows.
+    ShowWindow $HWNDPARENT 0
     Exec '"$INSTDIR\Sandglass.exe"'
   ${ElseIf} ${Silent}
     Exec '"$INSTDIR\Sandglass.exe"'

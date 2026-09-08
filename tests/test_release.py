@@ -274,6 +274,86 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('Icon "..\\sandglass\\web\\assets\\orb.ico"', installer)
         self.assertIn('UninstallIcon "..\\sandglass\\web\\assets\\orb.ico"', installer)
 
+    def test_windows_update_smoke_is_bounded_and_exercises_the_real_protocol(self):
+        script_path = ROOT / "tools" / "smoke_windows_update.ps1"
+        self.assertTrue(script_path.is_file())
+        script = script_path.read_text(encoding="utf-8")
+        # The smoke is allowed to mutate only its generated temp tree and the
+        # two exact HKCU keys it snapshots/restores. These are protocol guards,
+        # not comments: each phrase is part of an executable operation below.
+        for parameter in ("$OldInstaller", "$NewInstaller", "$ExpectedGitCommit"):
+            self.assertIn(parameter, script)
+        for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "SANDGLASS_HOME"):
+            self.assertIn("$env:" + name, script)
+        self.assertIn('"/S", "/D=$installDir"', script)
+        self.assertIn('"/UPDATE", "/PARENTPID=$oldPanelPid", "/RESTARTEXE=$oldExe"', script)
+        self.assertIn("/UPDATE", script)
+        self.assertIn("-match '(?i)(^|\\s)/S(?:\\s|$)'", script)
+        self.assertIn('Invoke-InstalledStop', script)
+        self.assertIn('Stop-Process -Id $oldPanelPid -Force', script)
+        handoff = script.index('Stop-Process -Id $oldPanelPid -Force')
+        installer_wait = script.index('Wait-ProcessExitBounded $updateProcess', handoff)
+        self.assertNotIn('Invoke-InstalledStop', script[handoff:installer_wait],
+                         "成功路径必须让安装器自己停止 observer")
+        self.assertIn('if ($updateProcess.ExitCode -ne 0)', script)
+        self.assertIn('phase=$phase', script)
+        self.assertIn('"--self-test"', script)
+        self.assertIn('Sandglass-build-provenance.json', script)
+        self.assertIn('git_head', script)
+        self.assertIn('"$installDir.update-backup"', script)
+        self.assertIn('"Sandglass-update-$oldPanelPid"', script)
+        self.assertIn('Save-RegistryKey $oldInstallKey', script)
+        self.assertIn('Restore-RegistryKey $oldInstallKey', script)
+        self.assertIn('Restore-RegistryKey $oldUninstallKey', script)
+        self.assertIn('"HKCU\\Software\\Sandglass"', script)
+        self.assertIn('"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass"', script)
+        self.assertIn('Get-TreeSnapshot $providerRoot', script)
+        self.assertIn('Provider fixtures changed during update', script)
+        self.assertIn('SANDGLASS_HOME was removed by uninstall', script)
+        self.assertIn('Remove-SmokeRoot', script)
+        self.assertNotIn('Stop-Process -Name', script)
+        self.assertNotIn('Invoke-WebRequest', script)
+        self.assertTrue(script.rstrip().endswith("exit 0"),
+                        "成功烟测必须显式返回自己的退出码")
+        self.assertNotIn('Start-BitsTransfer', script)
+
+    def test_windows_update_smoke_measures_and_restores_exact_state(self):
+        """The smoke must prove the real handoff and leave the host untouched."""
+        script = (ROOT / "tools" / "smoke_windows_update.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[Parameter(Mandatory = $true)]\n    [string]$ExpectedGitCommit", script)
+        self.assertIn("Get-FileHash -LiteralPath $oldInstallerPath -Algorithm SHA256", script)
+        self.assertIn("$oldInstallerHash -eq $newInstallerHash", script)
+        self.assertIn("--observer", script)
+        self.assertIn("Test-MutexHeld \"Local\\Sandglass.Observer.SingleInstance\"", script)
+        self.assertIn("MainWindowHandle", script)
+        self.assertIn("IsWindowVisible", script)
+        self.assertIn("MainWindowTitle", script)
+        self.assertIn("Wait-ProcessExitBounded", script)
+        for process_name in ("$oldInstall", "$updateProcess", "$selfTest", "$uninstall"):
+            self.assertIn(f"Wait-ProcessExitBounded {process_name}", script)
+        self.assertIn("Save-RunValue", script)
+        self.assertIn("Restore-RunValue", script)
+        self.assertIn("RegistryValueKind", script)
+        self.assertIn("DoNotExpandEnvironmentNames", script)
+        self.assertIn("$State.Value.Exported = $true", script)
+        self.assertIn("-not $State.Exported", script)
+        self.assertIn("try { Restore-RegistryKey $oldInstallKey", script)
+        self.assertIn("try { Restore-RegistryKey $oldUninstallKey", script)
+        self.assertIn("$provenanceValue.git_head -eq $oldProvenance.git_head", script)
+        self.assertIn("$provenanceValue.build_id -eq $oldProvenance.build_id", script)
+        self.assertIn("Provider snapshot refuses a reparse point", script)
+        self.assertIn('Type = "Directory"', script)
+        self.assertIn("$uninstallAttempted", script)
+        self.assertIn('-ArgumentList "/S"', script)
+        self.assertNotIn('"_?=$installDir"', script)
+        self.assertIn('Wait-Until { -not (Test-Path -LiteralPath $installDir) }', script)
+        self.assertIn("$updateStagePath", script)
+        self.assertIn("$updateFailureLog", script)
+        self.assertIn("if ($null -ne $failure) {", script)
+        self.assertIn("    exit 1", script)
+        self.assertIn("UPDATE SMOKE CLEANUP FAILED", script)
+
     def test_runtime_sbom_gate_requires_runtime_and_rejects_build_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "runtime.cdx.json"
@@ -711,6 +791,10 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn("/UPDATE", self._nsi())
         self.assertIn("WaitForSingleObject", self._nsi())
         self.assertIn("UpdateInstFilesShow", self._nsi())
+        self.assertIn("SetAutoClose true", self._nsi())
+        self.assertIn('FileWrite $4 "$UpdatePhase$\\r$\\n"', self._nsi())
+        failure = self._nsi().split("Function UpdateFailure", 1)[1].split("FunctionEnd", 1)[0]
+        self.assertIn("Quit", failure)
         self.assertIn("${Silent}", section,
                       "普通 /S 安装仍必须保留现有静默路径")
 
@@ -718,8 +802,10 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         section = self._section(SECMAIN)
         write = section.index('File /r "${SOURCEDIR}')
         backup = section.index('Rename "$INSTDIR" "$UpdateBackup"')
+        leave_stage = section.index('SetOutPath "$TEMP"', backup)
         activate = section.index('Rename "$UpdateStage" "$INSTDIR"')
         self.assertLess(write, backup, "新版本必须先完整解到 staging")
+        self.assertLess(leave_stage, activate, "激活前必须离开 staging 当前目录")
         self.assertLess(backup, activate, "旧安装备份后才能激活新版本")
         self.assertIn('Rename "$UpdateBackup" "$INSTDIR"', self._nsi())
         self.assertNotIn('RMDir /r "$R0"', self._nsi())
@@ -731,6 +817,9 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('Rename "$UpdateStage" "$INSTDIR"', activation)
         self.assertIn('Exec \'"$UpdateRestartExe"\'', self._nsi())
         self.assertIn('${If} $UpdateBackup != ""', activation)
+        hide = activation.index("ShowWindow $HWNDPARENT 0")
+        relaunch = activation.index('Exec \'"$INSTDIR\\Sandglass.exe"\'', hide)
+        self.assertLess(hide, relaunch, "安装器窗口必须先消失，新版界面才能出现")
 
     def test_update_staging_path_uses_only_a_canonical_numeric_parent_pid(self):
         nsi = self._nsi()
