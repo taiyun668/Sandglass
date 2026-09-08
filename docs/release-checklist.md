@@ -5,34 +5,28 @@ privacy or correctness boundary.
 
 ## Where this stands, and what to do next (2026-09-08)
 
-The canonical checkout is `D:\Sandglass`, at `main@4016c7c`; it was verified
-clean before this checklist-only edit, and this worktree now carries only this
-uncommitted checklist change. The verified desktop is still running from that
-checkout; the Owner will stop it after the public sync and immediately before
-the outside build. The public tree is prepared locally as clean
-`public@74917f6`, while `origin/main` is `33961f0`; the prepared public commit
-has not been pushed. No SignPath account, certificate or sponsor exists. Code
-signing is not a release blocker for this preview because the maintainer-signed
-`SHA256SUMS.windows` manifest path exists; the shipped binaries remain unsigned,
-so first-run trust is still an Owner/second-machine acceptance concern.
+The canonical checkout is `D:\Sandglass`, and the product is stopped. The
+release source, tag `v0.1.0-preview.1`, and the public commit it identifies all
+resolve exactly to `8e366dcc48787a5299a5bf7b96f098c061e30c00`.
+The unsigned preview is published. The outside Windows build exited 0 from that
+public commit; all five release assets were verified, and the
+`SHA256SUMS.windows` manifest signature is valid. CI run `34215238877` is green
+with all four jobs successful. SignPath submission steps were skipped; no
+SignPath account, certificate or sponsor is claimed, and the shipped binaries
+remain unsigned.
 
-The current route is the unsigned pre-release `v0.1.0-preview.1`, in this order:
-
-1. Sync and push the flattened public tree from `public`.
-2. Stop the product, then run `tools/build_windows_release.ps1` outside the
-   container from the public commit.
-3. Verify the manifest signature and all five release assets.
-4. Tag and create the GitHub pre-release.
-5. Leave clean-machine acceptance and a real provider-state pass as
-   Owner/second-machine gates.
+The next gates belong to the Owner and a second machine: clean-machine install/
+uninstall, physical UI acceptance, and a real provider-state transition pass.
+The updater's `latest` query intentionally cannot see this pre-release.
 
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
 
-**The two audit FAILs are not work items.** `运行本体一致` reports that the
-running product is older code than the tree -- it is doing its job, and it
-clears when the product is restarted from the current checkout. `codex 开账后
-归属` is the known ledger gap; the checklist says do not make it green.
+Two named audit failures must be interpreted at their capture time rather than
+turned into work automatically. `运行本体一致` is expected only when a running
+product reports an older HEAD than the checkout; there is no running-product
+claim while the product is stopped. `codex 开账后归属` is the known ledger gap;
+the checklist says do not make it green.
 
 **What an agent can advance without the Owner, highest value first:**
 
@@ -699,13 +693,12 @@ it as a release blocker, and do not make it green.
 
 - [x] Choose installer plus portable ZIP as the first Windows artifact format;
   keep MSIX/Store as a later optional channel.
-- [x] Add a packaged-runtime CI gate that launches the unsigned bundle, waits
-  for the visible `SandglassOrb`, activates it, and then waits for the native
-  WPF panel to become visible after WebView2 sends its first layout message.
-  A passing workflow proves the packaged entry point, orb and WebView2-backed
-  panel on that CI image; it does not prove code-signing trust, tray interaction,
-  SmartScreen or clean-user-machine acceptance. No public CI run exists yet, so
-  this is an implemented gate rather than a completed release acceptance record.
+- [x] Add packaged-runtime CI gates for the built wheel and Windows bundle.
+  Public run `34215238877` passed both. The earlier hosted-runner GUI launch
+  check was removed because that environment has no authoritative interactive
+  desktop; CI proves packaged startup and self-test behavior, not a visible orb,
+  WPF panel, tray interaction, code-signing trust, SmartScreen behavior or
+  clean-user-machine acceptance. Physical UI acceptance remains a separate gate.
   - [x] 2026-09-06: the installer smoke ran end to end for the first time
     against a real build -- per-user silent install, post-install launch, install
     over a running copy aborting with exit code 2 and leaving the program intact
@@ -799,11 +792,11 @@ it as a release blocker, and do not make it green.
   suite, builds the wheel, the unsigned installer, and the inner SignPath
   payload on `windows-latest`. GitHub origin is
   `https://github.com/taiyun668/Sandglass`, public, first commit `92e3f81`.
-  Local `main` was not pushed.
-  Two things stay the Owner's and neither should be handed to an agent:
-  reviewing `docs/` for anything that should not be public before the first
-  push, since publication cannot be undone; and the SignPath application
-  itself. Verify SignPath's current terms on their site rather than from this
+  The private local `main` was deliberately never pushed; public history was
+  published only from the flattened `public` branch. The Owner completed the
+  irreversible `docs/` review before the first public push. The SignPath
+  application remains the Owner's and is deferred until the project has real
+  users; verify SignPath's current terms on their site rather than from this
   note.
   Expectation to set now: signing is not instant trust. Immediate SmartScreen
   standing belongs to EV certificates; an OV-class one earns reputation over
@@ -841,7 +834,16 @@ it as a release blocker, and do not make it green.
   2026-08-30 an unsigned PyInstaller candidate was blocked before startup and
   Code Integrity Operational events 3033/3077 identified the exact executable,
   Enterprise signing-level failure and active policy ID.
-- [ ] Publish checksums, dependency/SBOM evidence and reproducible release provenance with each GitHub release.
+- [x] Publish checksums, dependency/SBOM evidence and reproducible release provenance with the GitHub release (completed for `v0.1.0-preview.1`).
+  - [x] `v0.1.0-preview.1` is tagged and published at public commit
+    `8e366dcc48787a5299a5bf7b96f098c061e30c00`; the outside build exited 0 from
+    that clean commit, and its embedded `Sandglass-build-provenance.json` binds
+    the exact Git commit, version, clean-worktree state and web/native resource
+    hashes. The five verified release assets are
+    `Sandglass-0.1.0-windows-x64-unsigned-setup.exe`,
+    `Sandglass-0.1.0-windows-x64-unsigned-portable.zip`,
+    `Sandglass-0.1.0-windows-x64-runtime.cdx.json`, `SHA256SUMS.windows` and
+    `SHA256SUMS.windows.sig`; the manifest signature is valid.
   - [x] Generate and validate a reproducible CycloneDX runtime SBOM separately
     from build-only tools; include it in Windows artifact checksums.
   - [x] Ship exact third-party license/notice texts with the Windows bundle;
