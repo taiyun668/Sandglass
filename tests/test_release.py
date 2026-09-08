@@ -1,10 +1,12 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import tomllib
 import unittest
+import uuid
 from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -328,6 +330,8 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("[Parameter(Mandatory = $true)]\n    [string]$ExpectedGitCommit", script)
         self.assertIn("Get-FileHash -LiteralPath $oldInstallerPath -Algorithm SHA256", script)
         self.assertIn("$oldInstallerHash -eq $newInstallerHash", script)
+        self.assertIn('$afterDelete = Invoke-Reg "query" $Key', script)
+        self.assertIn("Could not prove originally absent registry key", script)
         self.assertIn("--observer", script)
         self.assertIn("Test-MutexHeld \"Local\\Sandglass.Observer.SingleInstance\"", script)
         self.assertIn("MainWindowHandle", script)
@@ -360,6 +364,77 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("$ExpectRollback", script)
         self.assertIn('phase -notlike "fault-post-activation*"', script)
         self.assertIn("did not restore the old build provenance", script)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell is required")
+    def test_windows_update_registry_helper_uses_process_exit_semantics(self):
+        """The PS 5.1 registry boundary must not turn missing-key stderr into an exception."""
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            self.skipTest("Windows PowerShell is required")
+        source = (ROOT / "tools" / "smoke_windows_update.ps1").read_text(encoding="utf-8")
+        start = source.index("function Invoke-Reg")
+        end = source.index("function Save-RegistryKey", start)
+        helper = source[start:end]
+        with tempfile.TemporaryDirectory(prefix="Sandglass reg smoke ") as tmp:
+            root = Path(tmp)
+            key = "HKCU\\Software\\SandglassSmokeProbe_" + uuid.uuid4().hex
+            export_path = root / "path with spaces" / "missing.reg"
+            probe = root / "registry-helper-probe.ps1"
+            probe.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                + helper
+                + "$present = Invoke-Reg 'query' 'HKCU'\n"
+                + "if ($present.ExitCode -ne 0) { throw \"present query exit $($present.ExitCode)\" }\n"
+                + f"$query = Invoke-Reg 'query' '{key}'\n"
+                + "if ($query.ExitCode -ne 1) { throw \"query exit $($query.ExitCode)\" }\n"
+                + f"$delete = Invoke-Reg 'delete' '{key}'\n"
+                + "if ($delete.ExitCode -ne 1) { throw \"delete exit $($delete.ExitCode)\" }\n"
+                + f"$export = Invoke-Reg 'export' '{key}' '{export_path}'\n"
+                + "if ($export.ExitCode -eq 0) { throw 'missing export unexpectedly succeeded' }\n"
+                + f"$import = Invoke-Reg 'import' $null '{export_path}'\n"
+                + "if ($import.ExitCode -eq 0) { throw 'missing import unexpectedly succeeded' }\n"
+                + "Write-Output 'AFTER'\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertIn("AFTER", completed.stdout)
+
+        # Mutation guard: putting the old native call back must fail before
+        # AFTER on Windows PowerShell 5.1, proving the test exercises behavior
+        # rather than merely checking source text.
+        mutated = helper.replace(
+            '        $process = [System.Diagnostics.Process]::Start($startInfo)\n',
+            '        & reg.exe query $Key 2>$null | Out-Null\n'
+            '        $process = $null\n',
+        )
+        self.assertNotEqual(mutated, helper)
+        with tempfile.TemporaryDirectory(prefix="Sandglass reg mutation ") as tmp:
+            probe = Path(tmp) / "registry-helper-mutation.ps1"
+            key = "HKCU\\Software\\SandglassSmokeMutation_" + uuid.uuid4().hex
+            probe.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                + mutated
+                + f"$query = Invoke-Reg 'query' '{key}'\n"
+                + "Write-Output 'AFTER'\n",
+                encoding="utf-8",
+            )
+            mutated_run = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        self.assertNotEqual(mutated_run.returncode, 0)
+        self.assertNotIn("AFTER", mutated_run.stdout)
+        self.assertIn("NativeCommandError", mutated_run.stderr)
 
     def test_runtime_sbom_gate_requires_runtime_and_rejects_build_tools(self):
         with tempfile.TemporaryDirectory() as tmp:

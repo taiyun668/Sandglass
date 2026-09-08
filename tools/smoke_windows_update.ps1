@@ -204,19 +204,61 @@ function Invoke-InstalledStop {
     }
 }
 
+function Invoke-Reg([ValidateSet("query", "export", "delete", "import")][string]$Operation,
+    [string]$Key, [string]$File) {
+    $arguments = @()
+    switch ($Operation) {
+        "query" { $arguments = @("query", $Key) }
+        "export" { $arguments = @("export", $Key, $File, "/y") }
+        "delete" { $arguments = @("delete", $Key, "/f") }
+        "import" { $arguments = @("import", $File) }
+    }
+
+    # ProcessStartInfo keeps reg.exe stderr out of PowerShell 5.1's
+    # native-command error adapter. Quote each argument explicitly so
+    # export/import paths with spaces are passed as one argument. Windows paths
+    # cannot contain a double quote, so this does not expose or log contents.
+    $quotedArguments = @($arguments | ForEach-Object {
+        '"' + ([string]$_).Replace('"', '\\"') + '"'
+    })
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "reg.exe"
+    $startInfo.Arguments = ($quotedArguments -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch { }
+            try { $process.WaitForExit(2000) | Out-Null } catch { }
+            throw "reg.exe $Operation timed out."
+        }
+        # Drain both redirected streams after the bounded wait. reg.exe output
+        # is intentionally discarded; only the process-owned exit code matters.
+        $null = $process.StandardOutput.ReadToEnd()
+        $null = $process.StandardError.ReadToEnd()
+        return [pscustomobject]@{ ExitCode = [int]$process.ExitCode }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
 function Save-RegistryKey([string]$Key, [string]$File, [ref]$State) {
     $parent = Split-Path -Parent $File
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    & reg.exe query $Key 2>$null | Out-Null
-    $queryExitCode = $LASTEXITCODE
+    $queryResult = Invoke-Reg "query" $Key
+    $queryExitCode = $queryResult.ExitCode
     if ($queryExitCode -eq 0) {
         # Mark existence before export. If export fails, finally sees a known
         # original key but an uncommitted snapshot and leaves it untouched.
         $State.Value = [pscustomobject]@{
             Known = $true; Existed = $true; Exported = $false; File = $File
         }
-        & reg.exe export $Key $File /y | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Could not export registry key $Key." }
+        $exportResult = Invoke-Reg "export" $Key $File
+        if ($exportResult.ExitCode -ne 0) { throw "Could not export registry key $Key." }
         $State.Value.Exported = $true
         return
     }
@@ -231,10 +273,19 @@ function Save-RegistryKey([string]$Key, [string]$File, [ref]$State) {
 
 function Restore-RegistryKey([string]$Key, [psobject]$State) {
     if ($null -eq $State -or -not $State.Known -or -not $State.Exported) { return }
-    & reg.exe delete $Key /f 2>$null | Out-Null
+    $deleteResult = Invoke-Reg "delete" $Key
+    if ($deleteResult.ExitCode -ne 0) {
+        if ($State.Existed) {
+            throw "Could not delete registry key $Key before restore (reg.exe exit $($deleteResult.ExitCode))."
+        }
+        $afterDelete = Invoke-Reg "query" $Key
+        if ($afterDelete.ExitCode -ne 1) {
+            throw "Could not prove originally absent registry key $Key was removed (delete exit $($deleteResult.ExitCode), query exit $($afterDelete.ExitCode))."
+        }
+    }
     if ($State.Existed) {
-        & reg.exe import $State.File | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Could not restore registry key $Key." }
+        $importResult = Invoke-Reg "import" $null $State.File
+        if ($importResult.ExitCode -ne 0) { throw "Could not restore registry key $Key." }
     }
 }
 
