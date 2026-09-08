@@ -451,15 +451,30 @@ def apply_update_request(shell, body: str) -> dict:
         envelope = json.loads(body) if body else {}
     except (TypeError, ValueError):
         envelope = {}
-    offer = envelope.get("offer") if isinstance(envelope.get("offer"), dict) else None
-    if not offer:
-        offer = available_update()
-    if not offer:
+    requested_version = envelope.get("version") if isinstance(envelope, dict) else None
+    # Older panels sent {offer: {version: ...}}. Keep accepting that shape for
+    # compatibility, but never accept any other client-supplied offer field.
+    if not isinstance(requested_version, str):
+        legacy_offer = envelope.get("offer") if isinstance(envelope, dict) else None
+        requested_version = legacy_offer.get("version") if isinstance(legacy_offer, dict) else None
+    if not isinstance(requested_version, str) or not requested_version.strip():
+        return {"ok": False, "error": "invalid_update_request"}
+    try:
+        # The displayed offer may be stale or have been tampered with in the
+        # request. Re-read the release, checksum manifest, and signature now.
+        offer = available_update(force=True)
+    except Exception as exc:  # noqa: BLE001 - fail closed while panel remains up
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+    if not isinstance(offer, dict) or not offer:
         return {"ok": False, "error": "no_update"}
+    if offer.get("version") != requested_version:
+        return {"ok": False, "error": "stale_update"}
     try:
         result = apply_update(offer)
     except Exception as exc:  # noqa: BLE001 - the reason belongs on screen
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return result if isinstance(result, dict) else {"ok": False, "error": "apply_failed"}
     if shell is not None:
         shell.quit()
     return result

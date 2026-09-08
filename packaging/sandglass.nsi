@@ -37,8 +37,28 @@ Var UpdateParentPid
 Var UpdateBackup
 Var UpdateStage
 Var UpdateRestartExe
+Var UpdateSourceExe
+Var UpdateHasInstalled
+Var UpdateBackupCreated
+Var UpdateActivated
+Var UpdateNewRemoved
 Var UpdatePhase
 Var UpdateFailureLog
+Var UpdateRegistryCaptured
+Var UpdateOldInstallDir
+Var UpdateOldInstallDirPresent
+Var UpdateOldDisplayName
+Var UpdateOldDisplayNamePresent
+Var UpdateOldDisplayVersion
+Var UpdateOldDisplayVersionPresent
+Var UpdateOldDisplayIcon
+Var UpdateOldDisplayIconPresent
+Var UpdateOldUninstallString
+Var UpdateOldUninstallStringPresent
+Var UpdateOldNoModify
+Var UpdateOldNoModifyPresent
+Var UpdateOldNoRepair
+Var UpdateOldNoRepairPresent
 
 Name "Sandglass"
 OutFile "${ARTIFACTDIR}\${ARTIFACTNAME}.exe"
@@ -97,6 +117,12 @@ Function .onInit
     IntOp $R7 $UpdateParentPid + 0
     ${If} $R7 <= 0
       SetErrorLevel 20
+      Abort
+    ${EndIf}
+    ${If} $UpdateRestartExe == ""
+      ; Portable handoff and rollback both require the exact executable that
+      ; launched the updater. Do not proceed without a restart source.
+      SetErrorLevel 22
       Abort
     ${EndIf}
     StrCpy $UpdateParentPid $R7
@@ -174,28 +200,165 @@ Function UpdateFailure
     FileOpen $4 "$UpdateFailureLog" w
     FileWrite $4 "$UpdatePhase$\r$\n"
     FileClose $4
+    ; A post-activation failure may already have created the installed-channel
+    ; shortcut. Remove only that product-owned link before restoring the old
+    ; installed tree or returning to the portable source.
+    Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
+    RMDir "$SMPROGRAMS\Sandglass"
     ${If} $UpdateStage != ""
       RMDir /r "$UpdateStage"
     ${EndIf}
-    ${If} $UpdateBackup != ""
-      ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
-        Rename "$UpdateBackup" "$INSTDIR"
+    ; Once the staged tree has been activated, the target is the new tree.
+    ; Remove it before restoring the old directory; Rename cannot replace an
+    ; existing directory and would otherwise leave the broken new runtime in
+    ; place while reporting that rollback happened.
+    ${If} $UpdateActivated == 1
+      StrCpy $UpdateNewRemoved 0
+      ClearErrors
+      RMDir /r "$INSTDIR"
+      ${If} ${Errors}
+        ; Keep the backup intact and record the exact rollback failure. There
+        ; is no safe way to claim the old runtime was restored when AV or a
+        ; running child kept the new tree open.
+        StrCpy $UpdatePhase "$UpdatePhase-rollback-remove-new"
+      ${Else}
+        StrCpy $UpdateNewRemoved 1
       ${EndIf}
-      ${If} ${FileExists} "$INSTDIR\Sandglass.exe"
+    ${EndIf}
+    ${If} $UpdateBackupCreated == 1
+      ${If} $UpdateActivated != 1
+        ; The old tree was moved aside but activation never completed.
+        ClearErrors
+        Rename "$UpdateBackup" "$INSTDIR"
+        ${If} ${Errors}
+          StrCpy $UpdatePhase "$UpdatePhase-rollback-restore-old"
+        ${EndIf}
+      ${ElseIf} $UpdateNewRemoved == 1
+        ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
+          ClearErrors
+          Rename "$UpdateBackup" "$INSTDIR"
+          ${If} ${Errors}
+            StrCpy $UpdatePhase "$UpdatePhase-rollback-restore-old"
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+      ${If} $UpdateActivated == 1
+        ${If} $UpdateNewRemoved == 1
+          ${If} ${FileExists} "$INSTDIR\Sandglass.exe"
+            Call RestoreUpdateRegistry
+            Exec '"$INSTDIR\Sandglass.exe"'
+          ${EndIf}
+        ${EndIf}
+      ${ElseIf} ${FileExists} "$INSTDIR\Sandglass.exe"
+        ; Failure before activation leaves the original installation in place.
+        Call RestoreUpdateRegistry
         Exec '"$INSTDIR\Sandglass.exe"'
       ${ElseIf} ${FileExists} "$UpdateBackup\Sandglass.exe"
+        ClearErrors
+        Call RestoreUpdateRegistry
         Exec '"$UpdateBackup\Sandglass.exe"'
       ${EndIf}
     ${ElseIf} $UpdateRestartExe != ""
-      ${If} ${FileExists} "$UpdateRestartExe"
-        ; Portable-to-installed update failure: restart the original portable
-        ; executable. Never mistake a partly extracted target for the old app.
-        Exec '"$UpdateRestartExe"'
-      ${EndIf}
+      ; Portable-to-installed update failure: restart the original portable
+      ; executable. Never inspect, rename, or remove its source directory.
+      Call RestoreUpdateRegistry
+      Exec '"$UpdateRestartExe"'
     ${EndIf}
+    ; If rollback itself changed the phase, overwrite the first diagnostic so
+    ; callers see the final, actionable state rather than a stale write phase.
+    SetOutPath "$TEMP"
+    FileOpen $4 "$UpdateFailureLog" w
+    FileWrite $4 "$UpdatePhase$\r$\n"
+    FileClose $4
     SetErrorLevel 20
     Quit
   ${EndIf}
+FunctionEnd
+
+; Save the product-owned values before an update can write any of them. The
+; presence flags distinguish an absent value from an intentionally empty one.
+; This is used only by /UPDATE, so ordinary installs keep their existing
+; registry behavior.
+Function SnapshotUpdateRegistry
+  StrCpy $UpdateRegistryCaptured 1
+  ClearErrors
+  ReadRegStr $UpdateOldInstallDir HKCU "Software\Sandglass" "InstallDir"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldInstallDirPresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegStr $UpdateOldDisplayName HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldDisplayNamePresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegStr $UpdateOldDisplayVersion HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayVersion"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldDisplayVersionPresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegStr $UpdateOldDisplayIcon HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayIcon"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldDisplayIconPresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegStr $UpdateOldUninstallString HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldUninstallStringPresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegDWORD $UpdateOldNoModify HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldNoModifyPresent 1
+  ${EndIf}
+  ClearErrors
+  ReadRegDWORD $UpdateOldNoRepair HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldNoRepairPresent 1
+  ${EndIf}
+FunctionEnd
+
+Function RestoreUpdateRegistry
+  ${If} $UpdateRegistryCaptured != 1
+    Return
+  ${EndIf}
+  ${If} $UpdateOldInstallDirPresent == 1
+    WriteRegStr HKCU "Software\Sandglass" "InstallDir" "$UpdateOldInstallDir"
+  ${Else}
+    DeleteRegValue HKCU "Software\Sandglass" "InstallDir"
+  ${EndIf}
+  DeleteRegKey /ifempty HKCU "Software\Sandglass"
+  ${If} $UpdateOldDisplayNamePresent == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName" "$UpdateOldDisplayName"
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName"
+  ${EndIf}
+  ${If} $UpdateOldDisplayVersionPresent == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayVersion" "$UpdateOldDisplayVersion"
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayVersion"
+  ${EndIf}
+  ${If} $UpdateOldDisplayIconPresent == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayIcon" "$UpdateOldDisplayIcon"
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayIcon"
+  ${EndIf}
+  ${If} $UpdateOldUninstallStringPresent == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString" "$UpdateOldUninstallString"
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString"
+  ${EndIf}
+  ${If} $UpdateOldNoModifyPresent == 1
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify" $UpdateOldNoModify
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify"
+  ${EndIf}
+  ${If} $UpdateOldNoRepairPresent == 1
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair" $UpdateOldNoRepair
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair"
+  ${EndIf}
+  DeleteRegKey /ifempty HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"
 FunctionEnd
 
 ; Push "free", "held" or "unknown" for the observer's single-instance mutex.
@@ -231,16 +394,52 @@ Section "Sandglass" SecMain
   ; about to be replaced, and File /r over a locked target leaves whichever
   ; pieces could be written next to the ones that could not -- an install the
   ; user believes happened. Ask the previous copy to stop, then prove the
-  ; program file is actually free before writing anything.
+  ; program file is actually free before writing anything. In /UPDATE mode
+  ; $UpdateRestartExe is also a source: a portable copy has no install-registry
+  ; entry, but its detached observer still owns the global observer mutex.
   ReadRegStr $R0 HKCU "Software\Sandglass" "InstallDir"
+  StrCpy $UpdateSourceExe ""
+  StrCpy $UpdateHasInstalled 0
+  StrCpy $UpdateBackupCreated 0
+  StrCpy $UpdateActivated 0
+  StrCpy $UpdateNewRemoved 0
   ${If} $R0 != ""
-    ${AndIf} ${FileExists} "$R0\Sandglass.exe"
+    ClearErrors
+    ${If} ${FileExists} "$R0\Sandglass.exe"
+      StrCpy $UpdateSourceExe "$R0\Sandglass.exe"
+      StrCpy $UpdateHasInstalled 1
+    ${EndIf}
+  ${EndIf}
+  ${If} $UpdateMode == 1
+    ${If} $UpdateHasInstalled != 1
+      ; InstallDirRegKey can leave a stale path in $INSTDIR. Portable
+      ; handoff always targets the documented current-user install location;
+      ; never rename or clean the portable source or a stale registry path.
+!ifdef SANDGLASS_TEST_UPDATE_TARGET
+      ; Test-only compile target keeps portable handoff smoke out of the real
+      ; current-user install directory. Ordinary release builds never define it.
+      StrCpy $INSTDIR "${SANDGLASS_TEST_UPDATE_TARGET}"
+!else
+      StrCpy $INSTDIR "$LOCALAPPDATA\Programs\Sandglass"
+!endif
+    ${EndIf}
+    ${If} $UpdateSourceExe == ""
+      ; Do not inspect the portable source directory. The updater supplied the
+      ; exact executable that launched it and that is the only source path we
+      ; need to invoke for the observer handoff.
+      StrCpy $UpdateSourceExe "$UpdateRestartExe"
+      Call SnapshotUpdateRegistry
+    ${Else}
+      Call SnapshotUpdateRegistry
+    ${EndIf}
+  ${EndIf}
+  ${If} $UpdateSourceExe != ""
     ; --stop now waits for the observer to release the program files and reports
     ; whether it did. It used to signal and return 0 regardless, so this waited a
     ; fixed two seconds instead -- for an exit bounded by a fifteen-second vendor
     ; request per provider -- and then queried the desktop mutex, which says
     ; nothing about the detached observer the comment above names as the holder.
-    ExecWait '"$R0\Sandglass.exe" --stop' $0
+    ExecWait '"$UpdateSourceExe" --stop' $0
     ${If} $0 != 0
       StrCpy $UpdatePhase "stop-observer"
       ${If} $UpdateMode == 1
@@ -310,26 +509,28 @@ Section "Sandglass" SecMain
       ${EndIf}
     ${EndIf}
 
-    ClearErrors
-    Rename "$R0\Sandglass.exe" "$R0\Sandglass.exe.replacing"
-    ${If} ${Errors}
-      StrCpy $UpdatePhase "executable-locked"
-      ${If} $UpdateMode == 1
-        Call UpdateFailure
-      ${ElseIf} ${Silent}
-        ; A self-update reaches here: the panel asked for it and has already
-        ; quit. /S does not suppress MessageBox, so a modal here would be a
-        ; detached installer waiting on a dialog nobody is looking for. This
-        ; aborts before File /r, so the old copy is untouched -- start it again
-        ; rather than leaving the user with no program at all.
-        Exec '"$R0\Sandglass.exe"'
-        SetErrorLevel 2
-      ${Else}
-        MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run this installer again."
+    ${If} $UpdateHasInstalled == 1
+      ClearErrors
+      Rename "$R0\Sandglass.exe" "$R0\Sandglass.exe.replacing"
+      ${If} ${Errors}
+        StrCpy $UpdatePhase "executable-locked"
+        ${If} $UpdateMode == 1
+          Call UpdateFailure
+        ${ElseIf} ${Silent}
+          ; A self-update reaches here: the panel asked for it and has already
+          ; quit. /S does not suppress MessageBox, so a modal here would be a
+          ; detached installer waiting on a dialog nobody is looking for. This
+          ; aborts before File /r, so the old copy is untouched -- start it again
+          ; rather than leaving the user with no program at all.
+          Exec '"$R0\Sandglass.exe"'
+          SetErrorLevel 2
+        ${Else}
+          MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run this installer again."
+        ${EndIf}
+        Abort
       ${EndIf}
-      Abort
+      Rename "$R0\Sandglass.exe.replacing" "$R0\Sandglass.exe"
     ${EndIf}
-    Rename "$R0\Sandglass.exe.replacing" "$R0\Sandglass.exe"
   ${EndIf}
 
   ${If} $UpdateMode == 1
@@ -341,7 +542,12 @@ Section "Sandglass" SecMain
       StrCpy $UpdatePhase "staging-exists"
       Call UpdateFailure
     ${EndIf}
+    ClearErrors
     CreateDirectory "$UpdateStage"
+    ${If} ${Errors}
+      StrCpy $UpdatePhase "create-stage"
+      Call UpdateFailure
+    ${EndIf}
     SetOutPath "$UpdateStage"
   ${Else}
     SetOutPath "$INSTDIR"
@@ -370,6 +576,7 @@ Section "Sandglass" SecMain
         StrCpy $UpdatePhase "backup-old"
         Call UpdateFailure
       ${EndIf}
+      StrCpy $UpdateBackupCreated 1
     ${Else}
       ; Rename can only create a new install directory. Refuse to merge into an
       ; unrelated non-empty directory chosen by stale external state.
@@ -385,23 +592,115 @@ Section "Sandglass" SecMain
       StrCpy $UpdatePhase "activate-new"
       Call UpdateFailure
     ${EndIf}
+    StrCpy $UpdateActivated 1
     StrCpy $UpdateStage ""
   ${EndIf}
 
+!ifdef SANDGLASS_TEST_FAULT_POST_ACTIVATION
+  ; Test-only compile fault: exercise the same rollback path used when a
+  ; post-activation filesystem or registry write reports ${Errors}. This
+  ; symbol is never supplied by the ordinary release build.
+  ${If} $UpdateMode == 1
+    StrCpy $UpdatePhase "fault-post-activation"
+    Call UpdateFailure
+  ${EndIf}
+!endif
+
+  ClearErrors
   CreateDirectory "$SMPROGRAMS\Sandglass"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "create-shortcut-directory"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   CreateShortcut "$SMPROGRAMS\Sandglass\Sandglass.lnk" "$INSTDIR\Sandglass.exe" "" "$INSTDIR\Sandglass.exe"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "create-shortcut"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
 !ifdef IMPORT_UNINST
+  ClearErrors
   File /oname=Uninstall.exe "${SIGNEDUNINST}"
 !else
+  ClearErrors
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 !endif
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstaller"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegStr HKCU "Software\Sandglass" "InstallDir" "$INSTDIR"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-install-registry"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName" "Sandglass"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-name"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayVersion" "${APPVERSION}"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-version"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayIcon" "$INSTDIR\Sandglass.exe"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-icon"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-string"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify" 1
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-nomodify"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair" 1
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-uninstall-norepair"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
 
   ${If} $UpdateMode == 1
     ${If} $UpdateBackup != ""

@@ -249,7 +249,11 @@ class ReleaseMetadataTests(unittest.TestCase):
             'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"',
             installer,
         )
-        self.assertNotIn('RMDir /r "$INSTDIR"', installer)
+        # The update rollback is allowed to remove the newly activated tree;
+        # the uninstaller must still avoid recursively deleting a user-chosen
+        # install directory.
+        uninstall = installer.split('Section "Uninstall"', 1)[1]
+        self.assertNotIn('RMDir /r "$INSTDIR"', uninstall)
         self.assertIn(r'RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"', installer)
         self.assertIn('"/S"', installer_smoke)
         self.assertIn("--self-test", installer_smoke)
@@ -353,6 +357,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("if ($null -ne $failure) {", script)
         self.assertIn("    exit 1", script)
         self.assertIn("UPDATE SMOKE CLEANUP FAILED", script)
+        self.assertIn("$ExpectRollback", script)
+        self.assertIn('phase -notlike "fault-post-activation*"', script)
+        self.assertIn("did not restore the old build provenance", script)
 
     def test_runtime_sbom_gate_requires_runtime_and_rejects_build_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -662,6 +669,28 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         body = self._nsi().split(name, 1)[1]
         return body.split("SectionEnd", 1)[0]
 
+    @staticmethod
+    def _real_directives(section):
+        """Return (line number, source) for non-comment NSIS lines.
+
+        Installer comments deliberately discuss the protocol (including
+        ``--stop`` and ``File /r``), so searching the raw section can prove a
+        comment's order instead of the executable directive's order.
+        """
+        return [
+            (number, line)
+            for number, line in enumerate(section.splitlines())
+            if line.strip() and not line.lstrip().startswith(";")
+        ]
+
+    def _directive_line(self, section, predicate):
+        matches = [
+            number for number, line in self._real_directives(section)
+            if predicate(line)
+        ]
+        self.assertEqual(len(matches), 1, matches)
+        return matches[0]
+
     def test_stop_reports_whether_the_observer_actually_let_go(self):
         """The installer is about to overwrite the files that process maps.
 
@@ -716,11 +745,68 @@ class RunningInstallLifecycleTests(unittest.TestCase):
 
     def test_install_stops_the_previous_copy_before_writing(self):
         section = self._section('Section "Sandglass" SecMain')
-        # The directive, not the phrase: the comment beside it says "File /r"
-        # too, and matching that would pass no matter where the guard sat.
-        write = section.index('File /r "${SOURCEDIR}')
-        self.assertIn("--stop", section)
-        self.assertLess(section.index("--stop"), write, "必须先停掉旧进程再覆盖文件")
+        stop = self._directive_line(
+            section, lambda line: line.strip().startswith("ExecWait ")
+            and "--stop" in line
+        )
+        write = self._directive_line(
+            section, lambda line: line.strip().startswith("File /r ")
+            and "${SOURCEDIR}" in line
+        )
+        self.assertLess(stop, write, "必须先停掉旧进程再覆盖文件")
+
+    def test_portable_update_gates_restart_source_without_touching_its_directory(self):
+        """A portable source still owns the detached observer and mutexes."""
+        installer = self._nsi()
+        section = self._section(SECMAIN)
+        stop = self._directive_line(
+            section, lambda line: line.strip().startswith("ExecWait ")
+            and "--stop" in line
+        )
+        write = self._directive_line(
+            section, lambda line: line.strip().startswith("File /r ")
+            and "${SOURCEDIR}" in line
+        )
+        lines = dict(self._real_directives(section))
+        self.assertIn('$UpdateSourceExe', lines[stop])
+        self.assertLess(stop, write)
+        self.assertIn('StrCpy $UpdateSourceExe "$UpdateRestartExe"', installer)
+        self.assertIn('StrCpy $INSTDIR "$LOCALAPPDATA\\Programs\\Sandglass"', installer)
+        self.assertIn('SANDGLASS_TEST_UPDATE_TARGET', installer)
+        self.assertNotIn('Rename "$UpdateRestartExe"', installer)
+        self.assertNotIn('RMDir /r "$UpdateRestartExe"', installer)
+        self.assertNotIn('FileExists} "$UpdateRestartExe"', installer)
+        copy_directive = section.index('File /r "${SOURCEDIR}')
+        self.assertIn('Call CheckSandglassMutex', section[:copy_directive])
+        self.assertIn('Sandglass.Desktop.SingleInstance', section[:copy_directive])
+
+    def test_stop_order_test_rejects_execwait_moved_after_file_copy(self):
+        """Mutation of the real ExecWait directive must make the invariant red."""
+        section = self._section(SECMAIN)
+        source_lines = section.splitlines()
+        stop_index = next(
+            i for i, line in enumerate(source_lines)
+            if line.strip().startswith("ExecWait ") and "--stop" in line
+        )
+        write_index = next(
+            i for i, line in enumerate(source_lines)
+            if line.strip().startswith("File /r ") and "${SOURCEDIR}" in line
+        )
+        moved = list(source_lines)
+        stop_line = moved.pop(stop_index)
+        moved.insert(write_index, stop_line)
+        mutated = "\n".join(moved)
+        with self.assertRaises(AssertionError):
+            self.assertLess(
+                self._directive_line(
+                    mutated, lambda line: line.strip().startswith("ExecWait ")
+                    and "--stop" in line
+                ),
+                self._directive_line(
+                    mutated, lambda line: line.strip().startswith("File /r ")
+                    and "${SOURCEDIR}" in line
+                ),
+            )
 
     def test_install_refuses_rather_than_writing_over_a_locked_program(self):
         """Half an upgrade is worse than none: it looks like it worked."""
@@ -761,8 +847,9 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         should come back.
         """
         section = self._section(SECMAIN)
-        guard_start = section.index("${Errors}")
-        guard = section[guard_start:section.index("Abort", guard_start)]
+        locked = section.index('StrCpy $UpdatePhase "executable-locked"')
+        guard_start = section.rfind("ClearErrors", 0, locked)
+        guard = section[guard_start:section.index("Abort", locked)]
         self.assertLess(guard.index("${Silent}"), guard.index("MessageBox"),
                         "静默分支必须在弹框之前分出去")
         self.assertTrue(self._exec_lines(guard, "$R0"),
@@ -810,6 +897,37 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('Rename "$UpdateBackup" "$INSTDIR"', self._nsi())
         self.assertNotIn('RMDir /r "$R0"', self._nsi())
 
+    def test_post_activation_operations_are_error_checked_and_rollback_is_testable(self):
+        installer = self._nsi()
+        section = self._section(SECMAIN)
+        activation = section.index('Rename "$UpdateStage" "$INSTDIR"')
+        after_activation = section[activation:]
+        for directive in (
+            'CreateDirectory "$SMPROGRAMS\\Sandglass"',
+            'CreateShortcut "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"',
+            'WriteUninstaller "$INSTDIR\\Uninstall.exe"',
+            'WriteRegStr HKCU "Software\\Sandglass" "InstallDir"',
+            'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass" "DisplayVersion"',
+            'WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass" "NoRepair"',
+        ):
+            self.assertIn(directive, after_activation, directive)
+        self.assertIn('SANDGLASS_TEST_FAULT_POST_ACTIVATION', installer)
+        failure = installer.split("Function UpdateFailure", 1)[1].split("FunctionEnd", 1)[0]
+        self.assertIn('$UpdateActivated == 1', failure)
+        self.assertLess(
+            failure.index('RMDir /r "$INSTDIR"'),
+            failure.index('Rename "$UpdateBackup" "$INSTDIR"'),
+        )
+        self.assertIn('Call RestoreUpdateRegistry', failure)
+        self.assertNotIn('DeleteRegKey HKCU "Software\\Sandglass"', failure)
+        self.assertIn('Delete "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"', failure)
+        restore = installer.split("Function RestoreUpdateRegistry", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertNotIn('DeleteRegKey HKCU "Software\\Sandglass"', restore)
+        self.assertIn('DeleteRegKey /ifempty HKCU "Software\\Sandglass"', restore)
+        self.assertIn('DeleteRegValue HKCU "Software\\Sandglass" "InstallDir"', restore)
+
     def test_portable_update_never_uses_an_empty_install_registry_path(self):
         section = self._section(SECMAIN)
         activation = section[section.index('File /r "${SOURCEDIR}') :]
@@ -830,8 +948,15 @@ class RunningInstallLifecycleTests(unittest.TestCase):
 
     def test_uninstall_stops_observing_before_deleting(self):
         section = self._section('Section "Uninstall"')
-        self.assertIn("--stop", section)
-        self.assertLess(section.index("--stop"), section.index("RMDir /r"),
+        stop = self._directive_line(
+            section, lambda line: line.strip().startswith("ExecWait ")
+            and "--stop" in line
+        )
+        remove = self._directive_line(
+            section, lambda line: line.strip().startswith("RMDir /r ")
+            and "\\_internal" in line
+        )
+        self.assertLess(stop, remove,
                         "必须先停止观测再删除程序目录")
 
     def test_uninstall_also_refuses_while_the_panel_is_running(self):

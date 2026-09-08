@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$NewInstaller,
     [Parameter(Mandatory = $true)]
-    [string]$ExpectedGitCommit
+    [string]$ExpectedGitCommit,
+    [switch]$ExpectRollback
 )
 
 $ErrorActionPreference = "Stop"
@@ -454,7 +455,15 @@ try {
 
     $null = Wait-ProcessExitBounded $updateProcess 120 "Update installer"
     $updateProcess.Refresh()
-    if ($updateProcess.ExitCode -ne 0) {
+    if ($ExpectRollback) {
+        if ($updateProcess.ExitCode -eq 0) {
+            throw "Fault-injected update unexpectedly returned exit code 0."
+        }
+        $phase = Read-UpdateFailurePhase
+        if ($phase -notlike "fault-post-activation*") {
+            throw "Fault-injected update reported unexpected phase=$phase."
+        }
+    } elseif ($updateProcess.ExitCode -ne 0) {
         $phase = Read-UpdateFailurePhase
         throw "Update installer returned exit code $($updateProcess.ExitCode), phase=$phase."
     }
@@ -476,14 +485,21 @@ try {
         throw "Updated executable self-test returned exit code $($selfTest.ExitCode)."
     }
     $provenanceValue = Read-Provenance $installDir
-    if ($provenanceValue.git_head -ne $ExpectedGitCommit) {
-        throw "Installed provenance HEAD $($provenanceValue.git_head) does not equal ExpectedGitCommit $ExpectedGitCommit."
-    }
-    if ($provenanceValue.git_head -eq $oldProvenance.git_head) {
-        throw "Update did not change installed provenance git_head."
-    }
-    if ($provenanceValue.build_id -eq $oldProvenance.build_id) {
-        throw "Update did not change installed provenance build_id."
+    if ($ExpectRollback) {
+        if ($provenanceValue.git_head -ne $oldProvenance.git_head -or
+            $provenanceValue.build_id -ne $oldProvenance.build_id) {
+            throw "Fault-injected update did not restore the old build provenance."
+        }
+    } else {
+        if ($provenanceValue.git_head -ne $ExpectedGitCommit) {
+            throw "Installed provenance HEAD $($provenanceValue.git_head) does not equal ExpectedGitCommit $ExpectedGitCommit."
+        }
+        if ($provenanceValue.git_head -eq $oldProvenance.git_head) {
+            throw "Update did not change installed provenance git_head."
+        }
+        if ($provenanceValue.build_id -eq $oldProvenance.build_id) {
+            throw "Update did not change installed provenance build_id."
+        }
     }
     if ($provenanceValue.git_dirty -ne $false) {
         throw "Installed build provenance is not from a clean worktree."
@@ -520,9 +536,14 @@ try {
     if ((Get-TreeSnapshot $providerRoot) -cne $providerBefore) {
         throw "Provider fixtures changed during update, self-test, or uninstall."
     }
-    Write-Output ("PASS update protocol, visible /UPDATE progress, parent wait, " +
-        "same-directory restart, provenance, rollback cleanup, state preservation, " +
-        "provider byte invariance")
+    if ($ExpectRollback) {
+        Write-Output ("PASS fault-injected post-activation rollback, old-version restart, " +
+            "old provenance restored, residue cleanup, state preservation, provider byte invariance")
+    } else {
+        Write-Output ("PASS update protocol, visible /UPDATE progress, parent wait, " +
+            "same-directory restart, provenance, rollback cleanup, state preservation, " +
+            "provider byte invariance")
+    }
 }
 catch {
     $failure = $_

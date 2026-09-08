@@ -2081,7 +2081,7 @@
     <div id="autostart-nudge"></div>
     <div class="menu" id="menu"></div>
   </div>
-  <script src="i18n.js?v=20260906a"></script>
+  <script src="i18n.js?v=20260908a"></script>
   <script>
     const NAMES = { claude: "Claude", codex: "Codex", grok: "Grok" };
     const I18N = window.SANDGLASS_I18N;
@@ -3177,7 +3177,7 @@
         const response = await fetch("/api/update/apply", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ offer: state.update }),
+          body: JSON.stringify({ version: state.update.version }),
         });
         const result = response.ok ? await response.json() : { ok: false };
         if (result.ok) return;          // the panel is closing; leave it disabled

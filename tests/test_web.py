@@ -1,4 +1,7 @@
 import unittest
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from sandglass.resources import WEB_DIR
@@ -15,7 +18,9 @@ class WebLocalizationTests(unittest.TestCase):
         html = INDEX.read_text(encoding="utf-8")
         catalog = I18N.read_text(encoding="utf-8")
 
-        self.assertIn('<script src="i18n.js?v=20260906a"></script>', html)
+        current_cache_version = "20260908a"
+        self.assertIn(f'<script src="i18n.js?v={current_cache_version}"></script>', html)
+        self.assertNotIn('<script src="i18n.js?v=20260906a"></script>', html)
         self.assertIn('id="app-menu"', html)
         self.assertIn('data-act="language"', html)
         self.assertIn('sandglass.ui.language', html)
@@ -62,6 +67,38 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn('esc(item)', script)
         self.assertIn('fetch("/api/update/announcement")', script)
         self.assertIn('fetch("/api/update/announcement/dismiss"', script)
+
+    def test_update_apply_posts_only_the_requested_version(self):
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+
+        self.assertIn('body: JSON.stringify({ version: state.update.version })', script)
+        self.assertNotIn('body: JSON.stringify({ offer: state.update })', script)
+
+    def test_announcement_notes_are_escaped_by_the_real_browser_function(self):
+        """Run the page's pure notes renderer in Node without adding a DOM dependency."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+        esc = script[script.index("    function esc("):script.index("    function pad2(")]
+        notes_fn = script[script.index("    function announcementNotesHtml("):script.index("    function updateDialogHtml(")]
+        notes = '<img src=x onerror="alert(1)">\n\n- <script>alert(2)</script>\n\n# 修复说明'
+        node_program = (
+            esc + "\n" + notes_fn + "\n" +
+            "process.stdout.write(JSON.stringify(announcementNotesHtml(" +
+            json.dumps(notes, ensure_ascii=False) + ")));"
+        )
+        completed = subprocess.run(
+            [node, "-e", node_program], capture_output=True, text=True,
+            encoding="utf-8", check=True
+        )
+        rendered = json.loads(completed.stdout)
+        self.assertIn("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;", rendered)
+        self.assertIn("&lt;script&gt;alert(2)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("<h3>修复说明</h3>", rendered)
 
     def test_update_checks_at_start_and_every_six_hours_without_auto_apply(self):
         html = INDEX.read_text(encoding="utf-8")

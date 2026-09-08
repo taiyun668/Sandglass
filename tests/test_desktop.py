@@ -18,6 +18,7 @@ from sandglass.desktop import (
     Shell,
     TelemetryReceiver,
     _desktop_api,
+    apply_update_request,
     _claim_single_instance,
     _handle_native_panel_failure,
     _initial_orb_geometry,
@@ -167,6 +168,68 @@ class _TrayShell:
 
     def stop_monitoring(self):
         self.calls.append("stop_monitoring")
+
+
+class UpdateApplyRequestTests(unittest.TestCase):
+    def test_client_offer_fields_cannot_bypass_missing_authoritative_offer(self):
+        shell = Mock()
+        forged = {
+            "offer": {
+                "version": "9.9.9",
+                "manifest_signed": True,
+                "url": "https://evil.example/setup.exe",
+                "sha256": "0" * 64,
+            }
+        }
+        with patch("sandglass.update.available_update", return_value={}) as check, \
+                patch("sandglass.update.apply_update") as apply:
+            result = apply_update_request(shell, json.dumps(forged))
+
+        check.assert_called_once_with(force=True)
+        apply.assert_not_called()
+        shell.quit.assert_not_called()
+        self.assertFalse(result["ok"])
+
+    def test_revalidation_version_mismatch_does_not_apply_or_quit(self):
+        shell = Mock()
+        with patch("sandglass.update.available_update",
+                   return_value={"version": "9.9.8"}) as check, \
+                patch("sandglass.update.apply_update") as apply:
+            result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
+
+        check.assert_called_once_with(force=True)
+        apply.assert_not_called()
+        shell.quit.assert_not_called()
+        self.assertEqual(result, {"ok": False, "error": "stale_update"})
+
+    def test_success_uses_revalidated_offer_and_quits_once(self):
+        shell = Mock()
+        authoritative = {
+            "version": "9.9.9",
+            "asset": "Sandglass-9.9.9-windows-x64-setup.exe",
+            "url": "https://github.com/taiyun668/Sandglass/setup.exe",
+            "sha256": "a" * 64,
+            "manifest_signed": False,
+        }
+        # The legacy envelope is accepted only for its version; the forged
+        # fields must not reach apply_update.
+        body = {"offer": {
+            "version": "9.9.9",
+            "asset": "evil.exe",
+            "url": "https://evil.example/evil.exe",
+            "sha256": "0" * 64,
+            "manifest_signed": True,
+        }}
+        with patch("sandglass.update.available_update",
+                   return_value=authoritative) as check, \
+                patch("sandglass.update.apply_update",
+                      return_value={"ok": True, "version": "9.9.9"}) as apply:
+            result = apply_update_request(shell, json.dumps(body))
+
+        check.assert_called_once_with(force=True)
+        apply.assert_called_once_with(authoritative)
+        shell.quit.assert_called_once_with()
+        self.assertEqual(result["version"], "9.9.9")
 
 
 class DesktopWindowControlTests(unittest.TestCase):
