@@ -232,6 +232,10 @@ def api_payload(target: str, *, since: str | None = None,
         from sandglass.update import available_update
 
         return available_update(force="force" in parse_qs(parsed.query))
+    if parsed.path == "/api/update/announcement":
+        from sandglass.update import update_announcement
+
+        return update_announcement()
     if parsed.path == "/api/product-mode":
         return _note_answer("product_mode", mode_payload())
     raise KeyError(parsed.path)
@@ -798,6 +802,21 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 self._send_json(self._update_apply(body))
             except ValueError as exc:
+                self.send_error(400, str(exc))
+            return
+        if parsed.path == "/api/update/announcement/dismiss":
+            from sandglass.update import dismiss_update_announcement
+
+            body = self._read_json_body(MAX_USER_SOURCE_CONFIG_BODY)
+            if body is None:
+                return
+            try:
+                envelope = json.loads(body)
+                version = envelope.get("version") if isinstance(envelope, dict) else None
+                if not isinstance(version, str):
+                    raise ValueError("announcement dismissal requires a version")
+                self._send_json(dismiss_update_announcement(version))
+            except (json.JSONDecodeError, ValueError) as exc:
                 self.send_error(400, str(exc))
             return
         if parsed.path == "/api/telemetry-receiver":

@@ -48,6 +48,12 @@ def posted_endpoints() -> set[str]:
     return found
 
 
+def fetched_endpoints() -> set[str]:
+    """Every literal /api path the page reads with GET."""
+    text = PAGE.read_text(encoding="utf-8")
+    return set(re.findall(r'fetch\(\s*"(/api/[a-zA-Z0-9/_-]+)"\s*\)', text))
+
+
 class _Receiver:
     def __init__(self):
         self.on = False
@@ -130,6 +136,17 @@ class PanelTransportParityTests(unittest.TestCase):
                     self.fail(f"原生桥没有路由 {path}")
                 except (ValueError, TypeError, AttributeError):
                     pass  # routed; the fixture payload just did not suit it
+
+    def test_every_fetched_endpoint_is_routed_by_the_shared_get_api(self):
+        self.assertTrue(fetched_endpoints(), "没有从页面里解析到任何 GET 端点")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"SANDGLASS_HOME": tmp}
+        ):
+            for path in sorted(fetched_endpoints()):
+                try:
+                    serve.api_payload(path, live_quota=False)
+                except KeyError:
+                    self.fail(f"共享 GET API 没有路由 {path}")
 
 
 class OtlpListenerSurfaceTests(unittest.TestCase):

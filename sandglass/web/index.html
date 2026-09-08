@@ -1880,22 +1880,39 @@
       line-height: 16px;
     }
     .runtime-warning strong { display: block; margin-bottom: 2px; font-size: 12px; }
-    .update-banner {
-      display: flex; align-items: center; gap: 10px;
-      margin: 10px 14px 0; padding: 10px 12px;
-      border: 0.5px solid color-mix(in srgb, var(--fresh) 46%, var(--line));
-      border-radius: 10px;
-      background: color-mix(in srgb, var(--fresh) 10%, var(--card));
-      color: var(--text); font-size: 11px; line-height: 16px;
+    .update-badge-wrap {
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
     }
-    .update-banner .grow { flex: 1; min-width: 0; }
-    .update-banner strong { display: block; margin-bottom: 2px; font-size: 12px; }
-    .update-apply {
-      flex: none; border: 0; border-radius: 8px; cursor: pointer;
-      padding: 6px 12px; font: inherit; font-weight: 700;
-      background: var(--fresh); color: #fff;
+    .update-tooltip {
+      position: absolute;
+      z-index: 25;
+      top: calc(100% + 7px);
+      left: 0;
+      width: max-content;
+      max-width: min(280px, calc(100vw - 24px));
+      padding: 7px 10px;
+      border-radius: 8px;
+      background: var(--text);
+      color: var(--bg);
+      font-size: 11px;
+      line-height: 16px;
+      white-space: normal;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-3px);
+      transition: opacity .16s var(--ease), transform .16s var(--ease), visibility .16s;
     }
-    .update-apply[disabled] { opacity: .6; cursor: default; }
+    .update-badge-wrap:hover .update-tooltip,
+    .update-badge-wrap:focus-within .update-tooltip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
     .update-badge {
       display: grid;
       place-items: center;
@@ -1919,6 +1936,108 @@
     .update-badge:hover .badge-arrow,
     .update-badge:focus-visible .badge-arrow { transform: translateY(1.5px); }
     .update-badge:active .badge-arrow { transform: translateY(2.5px); }
+    .update-dialog-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(28, 27, 25, .38);
+      -webkit-backdrop-filter: blur(5px);
+      backdrop-filter: blur(5px);
+    }
+    .update-dialog {
+      display: flex;
+      flex-direction: column;
+      width: min(560px, 100%);
+      max-height: min(680px, calc(100dvh - 40px));
+      overflow: hidden;
+      border: 0.5px solid var(--line);
+      border-radius: 18px;
+      background: var(--card);
+      color: var(--text);
+      box-shadow: 0 22px 70px rgba(var(--shadow), .28);
+    }
+    .update-dialog-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 24px 24px 12px;
+    }
+    .update-dialog-head h2 {
+      flex: 1;
+      min-width: 0;
+      margin: 0;
+      font-size: 20px;
+      line-height: 28px;
+      font-weight: 760;
+      letter-spacing: -.025em;
+      overflow-wrap: anywhere;
+    }
+    .update-dialog-close {
+      flex: none;
+      width: 44px;
+      height: 44px;
+      margin: -8px -8px 0 0;
+      border: 0;
+      border-radius: 50%;
+      background: var(--hover);
+      color: var(--muted);
+      font: inherit;
+      font-size: 25px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .update-dialog-close:hover { color: var(--text); background: var(--track); }
+    .update-dialog-body {
+      min-height: 0;
+      overflow-y: auto;
+      overflow-wrap: anywhere;
+      padding: 0 24px 20px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 21px;
+    }
+    .update-dialog-body p { margin: 0 0 12px; }
+    .update-dialog-body p:last-child { margin-bottom: 0; }
+    .update-dialog-body h3 {
+      margin: 12px 0 6px;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 760;
+    }
+    .update-dialog-body ul { margin: 6px 0 12px; padding-left: 20px; }
+    .update-dialog-body li { margin: 3px 0; }
+    .update-dialog-error { color: var(--hot); }
+    .update-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 14px 24px 24px;
+      border-top: 0.5px solid var(--line);
+    }
+    .update-dialog-actions button {
+      min-width: 96px;
+      min-height: 44px;
+      padding: 9px 16px;
+      border: 0;
+      border-radius: 11px;
+      font: inherit;
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 720;
+      cursor: pointer;
+    }
+    .update-dialog-cancel { background: transparent; color: var(--muted); }
+    .update-dialog-cancel:hover { background: var(--hover); color: var(--text); }
+    .update-dialog-primary { background: var(--sel); color: #fff; }
+    .update-dialog-primary:hover { filter: brightness(1.06); }
+    .update-dialog-actions button[disabled] { opacity: .58; cursor: default; filter: none; }
+    body.update-dialog-open { overflow: hidden; }
+    body.update-dialog-open .popover > *:not(#update-dialog-root) { pointer-events: none; }
+    #update-dialog-root { pointer-events: auto; }
     @keyframes pulse {
       0%, 100% { opacity: .42; }
       50% { opacity: .88; }
@@ -1930,6 +2049,8 @@
       .update-badge:hover .badge-arrow,
       .update-badge:focus-visible .badge-arrow,
       .update-badge:active .badge-arrow { transform: none; }
+      .update-tooltip { transition: none; }
+      .update-dialog-primary:hover { filter: none; }
       .heat-cell { animation: none; transition: none; }
       .heat-cell::after { transition: none; }
       .body.tab-enter, .menu.tab-enter { animation: none; }
@@ -1954,7 +2075,7 @@
   <div class="popover">
     <div class="app-menu-shell" id="app-menu"></div>
     <nav class="tabs" id="tabs"></nav>
-    <div id="update-banner" aria-live="polite"></div>
+    <div id="update-dialog-root"></div>
     <div id="runtime-warning" aria-live="polite"></div>
     <main class="body" id="card"></main>
     <div id="autostart-nudge"></div>
@@ -1981,9 +2102,12 @@
       telemetry: null,
       diagnostics: null,
       update: null,
-      updateBanner: false,
+      updateDialogOpen: false,
       updateApplying: false,
       updateError: "",
+      announcement: null,
+      announcementOpen: false,
+      announcementDismissing: false,
       telemetrySetup: "",
       telemetryEnabling: "",
       telemetryCopied: "",
@@ -2921,39 +3045,56 @@
     }
 
     function updateBadgeHtml() {
-      // Same condition as the banner: nothing at all until a release actually
-      // offers something. It is the only thing up here that is not muted, and
-      // that is what makes it read as an offer rather than a control that has
-      // always been there.
       const offer = state.update;
       if (!offer || !offer.version) return "";
       const icon = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><g class="badge-arrow"><path d="M9 4v6.6"/><path d="m6.9 8.5 2.1 2.1 2.1-2.1"/></g><path d="M4.9 13.9h8.2"/></svg>`;
-      return `<button type="button" class="update-badge" data-act="update-badge" aria-label="${esc(t("updateTitle", { version: offer.version }))}" aria-controls="update-banner" aria-expanded="${state.updateBanner ? "true" : "false"}">${icon}</button>`;
+      const tip = t("updateTooltip", { version: offer.version });
+      return `<span class="update-badge-wrap"><button type="button" class="update-badge" data-act="update-badge" aria-label="${esc(t("updateTitle", { version: offer.version }))}" aria-describedby="update-tooltip">${icon}</button><span id="update-tooltip" class="update-tooltip" role="tooltip">${esc(tip)}</span></span>`;
     }
 
-    function updateBannerHtml() {
-      // Nothing until a release actually offers something. A permanent "you are
-      // up to date" line is a notification that never means anything, and this
-      // one has to mean something the moment it appears.
+    function announcementNotesHtml(notes) {
+      const source = Array.isArray(notes) ? notes.join("\n") : String(notes == null ? "" : notes);
+      const lines = source.replace(/\r\n?/g, "\n").split("\n");
+      const out = [];
+      let bullets = [];
+      const flush = () => {
+        if (!bullets.length) return;
+        out.push(`<ul>${bullets.map(item => `<li>${esc(item)}</li>`).join("")}</ul>`);
+        bullets = [];
+      };
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) { flush(); continue; }
+        const bullet = line.match(/^(?:[-*•]|\u2022)\s+(.*)$/);
+        if (bullet) { bullets.push(bullet[1]); continue; }
+        flush();
+        const heading = line.match(/^#{1,6}\s+(.+)$/) || line.match(/^([^。！？:：]{1,48})[:：]$/);
+        if (heading) out.push(`<h3>${esc(heading[1])}</h3>`);
+        else out.push(`<p>${esc(line)}</p>`);
+      }
+      flush();
+      return out.join("");
+    }
+
+    function updateDialogHtml() {
+      if (!state.announcementOpen && !state.updateDialogOpen) return "";
+      if (state.announcementOpen && state.announcement && state.announcement.version) {
+        const a = state.announcement;
+        const titleId = "update-announcement-title";
+        const bodyId = "update-announcement-body";
+        return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(a.version)} ${esc(t("announcementTitle"))}</h2><button type="button" class="update-dialog-close" data-act="announcement-dismiss" aria-label="${esc(t("announcementClose"))}">×</button></div><div class="update-dialog-body" id="${bodyId}">${announcementNotesHtml(a.notes)}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-primary" data-act="announcement-dismiss"${state.announcementDismissing ? ' disabled aria-busy="true"' : ""}>${esc(t("announcementDismiss"))}</button></div></section></div>`;
+      }
       const offer = state.update;
       if (!offer || !offer.version) return "";
-      // The badge carries the fact that there is an offer; this carries what
-      // accepting it does -- the app quits and comes back -- which the user
-      // should be able to read before clicking, not after.
-      if (!state.updateBanner) return "";
-      const label = state.updateApplying ? t("updateApplying") : t("updateApply");
-      const note = state.updateError
-        ? `<div class="muted">${esc(t("updateFailed"))}</div>`
-        : "";
-      return `<div class="update-banner" role="status">
-        <div class="grow"><strong>${esc(t("updateTitle", { version: offer.version }))}</strong>${esc(t("updateCopy"))}${note}</div>
-        <button type="button" class="update-apply" data-act="apply-update"${state.updateApplying ? " disabled" : ""}>${esc(label)}</button>
-      </div>`;
+      const titleId = "update-confirm-title";
+      const bodyId = "update-confirm-body";
+      const error = state.updateError ? `<p class="update-dialog-error" role="alert">${esc(t("updateFailed"))}</p>` : "";
+      return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(t("updateConfirmTitle"))}</h2><button type="button" class="update-dialog-close" data-act="update-cancel" aria-label="${esc(t("updateCancel"))}">×</button></div><div class="update-dialog-body" id="${bodyId}"><p>${esc(t("updateConfirmDescription", { version: offer.version }))}</p><p>${esc(t("updateCopy"))}</p>${error}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-cancel" data-act="update-cancel"${state.updateApplying ? " disabled" : ""}>${esc(t("updateCancel"))}</button><button type="button" class="update-dialog-primary" data-act="apply-update"${state.updateApplying ? ' disabled aria-busy="true"' : ""}>${esc(t(state.updateApplying ? "updateApplying" : "updateInstallRestart"))}</button></div></section></div>`;
     }
 
-    async function loadUpdate() {
+    async function loadUpdate(force = false) {
       try {
-        const response = await fetch("/api/update");
+        const response = await fetch(force ? "/api/update?force=1" : "/api/update");
         if (!response.ok) return;
         const offer = await response.json();
         state.update = offer && offer.version ? offer : null;
@@ -2963,8 +3104,72 @@
       render();
     }
 
+    async function loadAnnouncement() {
+      try {
+        const response = await fetch("/api/update/announcement");
+        if (!response.ok) return;
+        const announcement = await response.json();
+        if (announcement && announcement.version) {
+          state.announcement = announcement;
+          state.announcementOpen = true;
+          state.updateDialogOpen = false;
+          render();
+          requestAnimationFrame(focusUpdateDialog);
+        }
+      } catch (_) {}
+    }
+
+    function dialogFocusable() {
+      const dialog = document.querySelector(".update-dialog");
+      return dialog ? Array.from(dialog.querySelectorAll("button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")) : [];
+    }
+
+    function focusUpdateDialog() {
+      const dialog = document.querySelector(".update-dialog");
+      if (!dialog) return;
+      const buttons = dialogFocusable();
+      (state.announcementOpen ? buttons[buttons.length - 1] : dialog.querySelector('[data-act="update-cancel"]'))?.focus();
+    }
+
+    function closeUpdateDialog() {
+      if (state.announcementOpen) return dismissAnnouncement();
+      state.updateDialogOpen = false;
+      state.updateError = "";
+      render();
+      requestAnimationFrame(() => document.querySelector('[data-act="update-badge"]')?.focus());
+    }
+
+    async function dismissAnnouncement() {
+      if (state.announcementDismissing || !state.announcement) return;
+      const version = state.announcement.version;
+      state.announcementDismissing = true;
+      render();
+      try {
+        await fetch("/api/update/announcement/dismiss", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version }),
+        });
+      } catch (_) {}
+      state.announcementOpen = false;
+      state.announcement = null;
+      state.announcementDismissing = false;
+      render();
+      requestAnimationFrame(() => document.querySelector('[data-act="update-badge"]')?.focus() || document.querySelector('[data-act="app-menu"]')?.focus());
+    }
+
+    function openUpdateDialog() {
+      if (state.announcementOpen || !state.update) return;
+      state.appMenu = false;
+      state.languageOptions = false;
+      state.updateDialogOpen = true;
+      state.updateError = "";
+      render();
+      requestAnimationFrame(focusUpdateDialog);
+    }
+
     async function applyUpdate() {
-      if (state.updateApplying || !state.update) return;
+      if (state.updateApplying || !state.update || !state.updateDialogOpen || state.announcementOpen) return;
       state.updateApplying = true;
       state.updateError = "";
       render();
@@ -3385,14 +3590,22 @@
         state.help = false;
       }
       applyLocale();
+      const updateDialogOpen = state.announcementOpen || state.updateDialogOpen;
+      document.body.classList.toggle("update-dialog-open", updateDialogOpen);
       document.documentElement.classList.toggle("overview-mode", state.tab === "overview" && !state.help);
       document.body.classList.toggle("overview-mode", state.tab === "overview" && !state.help);
       document.getElementById("app-menu").innerHTML = appMenuHtml();
-      document.getElementById("update-banner").innerHTML = updateBannerHtml();
+      document.getElementById("update-dialog-root").innerHTML = updateDialogHtml();
       document.getElementById("runtime-warning").innerHTML = runtimeWarningHtml();
       document.getElementById("autostart-nudge").innerHTML = autostartNudgeHtml();
       renderTabs();
       renderCard();
+      for (const child of document.querySelector(".popover").children) {
+        if (child.id === "update-dialog-root") continue;
+        child.inert = updateDialogOpen;
+        if (updateDialogOpen) child.setAttribute("aria-hidden", "true");
+        else child.removeAttribute("aria-hidden");
+      }
     }
     function renderTabChange() {
       if (renderTabChange.timer) clearTimeout(renderTabChange.timer);
@@ -3645,10 +3858,15 @@
         return;
       }
       if (action === "update-badge") {
-        state.updateBanner = !state.updateBanner;
-        state.appMenu = false;
-        state.languageOptions = false;
-        render();
+        openUpdateDialog();
+        return;
+      }
+      if (action === "update-cancel") {
+        closeUpdateDialog();
+        return;
+      }
+      if (action === "announcement-dismiss") {
+        dismissAnnouncement();
         return;
       }
       if (tabBtn) {
@@ -3881,6 +4099,27 @@
     });
     document.addEventListener("click", dismissFloatingMenus);
     document.addEventListener("keydown", (ev) => {
+      if (state.announcementOpen || state.updateDialogOpen) {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          if (state.announcementOpen) dismissAnnouncement();
+          else closeUpdateDialog();
+          return;
+        }
+        if (ev.key === "Tab") {
+          const focusable = dialogFocusable();
+          if (!focusable.length) return;
+          const current = focusable.indexOf(document.activeElement);
+          let next = ev.shiftKey ? current - 1 : current + 1;
+          if (current < 0) next = 0;
+          if (next < 0) next = focusable.length - 1;
+          if (next >= focusable.length) next = 0;
+          ev.preventDefault();
+          focusable[next].focus();
+          return;
+        }
+        return;
+      }
       const menuItem = ev.target.closest('#app-menu-panel [role^="menuitem"]');
       if (state.appMenu && menuItem && ["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) {
         ev.preventDefault();
@@ -3938,15 +4177,25 @@
       if (!document.hidden && (state.lastOkAt || selectedOverviewIds().length)) loadQuota();
     });
     const POLL_MS = 20000;
+    const UPDATE_POLL_MS = 6 * 60 * 60 * 1000;
     let poll = null;
+    let updatePoll = null;
     let stampTick = null;
     function startPoll() {
       if (poll) clearInterval(poll);
       poll = setInterval(loadQuota, POLL_MS);
       if (!stampTick) stampTick = setInterval(paintStamps, 1000);
     }
+    function startUpdatePoll() {
+      if (updatePoll) clearInterval(updatePoll);
+      updatePoll = setInterval(() => {
+        if (!state.updateApplying && !state.updateDialogOpen && !state.announcementOpen) loadUpdate(true);
+      }, UPDATE_POLL_MS);
+    }
     render();
     loadUpdate();
+    loadAnnouncement();
+    startUpdatePoll();
     loadProductMode().then(() => {
       if (state.productMode.selected) {
         loadQuota();

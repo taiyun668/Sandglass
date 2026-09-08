@@ -476,6 +476,16 @@ def _desktop_api(receiver: TelemetryReceiver, method: str,
         )
     if method == "POST" and parsed.path == "/api/update/apply":
         return apply_update_request(shell, body)
+    if method == "POST" and parsed.path == "/api/update/announcement/dismiss":
+        from sandglass.update import dismiss_update_announcement
+
+        try:
+            envelope = json.loads(body) if body else {}
+        except (TypeError, ValueError):
+            envelope = {}
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("version"), str):
+            raise ValueError("announcement dismissal requires a version")
+        return dismiss_update_announcement(envelope["version"])
     if method == "POST" and parsed.path == "/api/telemetry-receiver":
         return apply_telemetry_receiver(receiver, body)
     if method == "POST" and parsed.path == "/api/user-sources/configure":

@@ -38,6 +38,57 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn("function revealSelectedLanguage()", html)
         self.assertIn("revealSelectedLanguage();", html)
 
+    def test_update_offer_uses_accessible_badge_and_modal_flow(self):
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+
+        self.assertNotIn('id="update-banner"', html)
+        self.assertIn('id="update-dialog-root"', html)
+        self.assertIn('class="update-badge-wrap"', script)
+        self.assertIn('aria-describedby="update-tooltip"', script)
+        self.assertIn('role="tooltip"', script)
+        self.assertIn('function updateDialogHtml()', script)
+        self.assertIn('role="dialog" aria-modal="true"', script)
+        self.assertIn('aria-labelledby="${titleId}" aria-describedby="${bodyId}"', script)
+        self.assertIn('data-act="update-cancel"', script)
+        self.assertIn('data-act="apply-update"', script)
+        self.assertIn('aria-busy="true"', script)
+        self.assertIn('function dialogFocusable()', script)
+        self.assertIn('child.inert = updateDialogOpen;', script)
+        self.assertIn('child.setAttribute("aria-hidden", "true")', script)
+        self.assertIn('if (ev.key === "Tab")', script)
+        self.assertIn('if (ev.key === "Escape")', script)
+        self.assertIn('function announcementNotesHtml(notes)', script)
+        self.assertIn('esc(item)', script)
+        self.assertIn('fetch("/api/update/announcement")', script)
+        self.assertIn('fetch("/api/update/announcement/dismiss"', script)
+
+    def test_update_checks_at_start_and_every_six_hours_without_auto_apply(self):
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+
+        self.assertIn('const UPDATE_POLL_MS = 6 * 60 * 60 * 1000;', script)
+        self.assertIn('updatePoll = setInterval(() => {', script)
+        self.assertIn('if (!state.updateApplying && !state.updateDialogOpen && !state.announcementOpen) loadUpdate(true);', script)
+        self.assertIn('force ? "/api/update?force=1" : "/api/update"', script)
+        self.assertIn('loadUpdate();\n    loadAnnouncement();\n    startUpdatePoll();', script)
+        self.assertEqual(script.count('fetch("/api/update/apply"'), 1)
+
+    def test_update_flow_strings_cover_all_locales(self):
+        catalog = I18N.read_text(encoding="utf-8")
+        for key in (
+            "updateTooltip", "updateConfirmTitle", "updateConfirmDescription",
+            "updateCancel", "updateInstallRestart", "announcementTitle",
+            "announcementDismiss", "announcementClose",
+        ):
+            self.assertEqual(catalog.count(key + ":"), 10, key)
+        self.assertIn("updateFlowTranslations", catalog)
+        for locale in (
+            "zh-CN", "zh-TW", "en-US", "es-ES", "fr-FR",
+            "de-DE", "pt-BR", "ru-RU", "ja-JP", "ko-KR",
+        ):
+            self.assertIn(f'"{locale}": {{', catalog)
+
     def test_language_menu_supports_keyboard_navigation_and_focus_return(self):
         html = INDEX.read_text(encoding="utf-8")
         script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]

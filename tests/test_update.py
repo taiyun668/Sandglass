@@ -2,9 +2,9 @@
 
 The button is dark until a release offers something, and the offer is only
 installable if it can be checked: a checksum published beside the installer, a
-download that matches it, and a signature Windows itself trusts. The project's
-release doctrine says an unsigned build is an internal candidate and not a
-public artifact -- an updater that would run one anyway makes that decorative.
+download that matches it, and either a trusted Windows signature or the
+project's signed release manifest. The public unsigned installer route uses
+the latter as its release identity.
 """
 
 from __future__ import annotations
@@ -74,6 +74,17 @@ class OfferTests(unittest.TestCase):
         self.assertEqual(offer["version"], "9.9.9")
         self.assertEqual(offer["sha256"], digest)
         self.assertEqual(offer["asset"], self.ASSET)
+
+    def test_release_body_is_carried_as_plain_text_notes(self):
+        release = self._release()
+        release["body"] = "修复输入框\n\n- 保留本地数据"
+        digest = "a" * 64
+        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+            update, "_get", return_value=(digest + "  " + self.ASSET).encode()
+        ):
+            offer = update.offer_from(release)
+        self.assertEqual(offer["notes"], release["body"])
+        self.assertIsInstance(offer["notes"], str)
 
     def test_a_checksum_file_that_omits_the_installer_offers_nothing(self):
         with patch.object(update, "_get", return_value=b"b" * 64 + b"  something-else.exe"):
@@ -300,6 +311,72 @@ class CheckStateTests(unittest.TestCase):
         self.assertEqual(offer, {})
         self.assertEqual(path.read_text(encoding="utf-8"), original)
         self.assertEqual(reported, ["update_state_write"])
+
+    def test_a_pending_announcement_survives_a_fresh_update_check(self):
+        state = {
+            "pending_announcement": {"version": "9.9.9", "notes": "已安装"},
+            "offer": {"version": "8.8.8"},
+        }
+        (self.home / "update-check.json").write_text(json.dumps(state), encoding="utf-8")
+        with patch.object(update, "_get", side_effect=OSError("404")):
+            update.available_update(force=True)
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["pending_announcement"], state["pending_announcement"])
+
+    def test_announcement_is_only_visible_to_its_installed_version(self):
+        state = {"pending_announcement": {
+            "version": "9.9.9", "notes": "release notes", "published_at": "", "notes_url": "",
+        }}
+        (self.home / "update-check.json").write_text(json.dumps(state), encoding="utf-8")
+        with patch.object(update, "__version__", "9.9.9"):
+            self.assertEqual(update.update_announcement(), state["pending_announcement"])
+        with patch.object(update, "__version__", "9.9.8"):
+            self.assertEqual(update.update_announcement(), {})
+
+    def test_dismiss_clears_only_the_exact_pending_version(self):
+        pending = {"version": "9.9.9", "notes": "release notes"}
+        (self.home / "update-check.json").write_text(
+            json.dumps({"offer": {"version": "10.0.0"}, "pending_announcement": pending}),
+            encoding="utf-8",
+        )
+        self.assertEqual(update.dismiss_update_announcement("9.9.8")["dismissed"], False)
+        self.assertEqual(update.update_announcement(), {})
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["pending_announcement"], pending)
+        self.assertTrue(update.dismiss_update_announcement("9.9.9")["dismissed"])
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertNotIn("pending_announcement", stored)
+
+
+class ApplyUpdateStateTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = patch.dict(os.environ, {"SANDGLASS_HOME": tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.home = Path(tmp.name)
+
+    def test_verified_update_records_announcement_and_uses_update_parent_protocol(self):
+        offer = {
+            "asset": "Sandglass-9.9.9-windows-x64-setup.exe",
+            "version": "9.9.9",
+            "notes": "修复窗口",
+            "published_at": "2026-09-08T00:00:00Z",
+            "notes_url": "https://github.com/taiyun668/Sandglass/releases/tag/v9.9.9",
+        }
+        seen = []
+        with patch.object(update, "download_verified", return_value=Path("setup.exe")), \
+                patch("subprocess.Popen", lambda args, **kwargs: seen.append(args)):
+            result = update.apply_update(offer)
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen[0][1:3], ["/UPDATE", f"/PARENTPID={os.getpid()}"])
+        self.assertEqual(seen[0][3], f"/RESTARTEXE={Path(update.sys.executable).resolve()}")
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["pending_announcement"], {
+            "version": "9.9.9", "notes": "修复窗口",
+            "published_at": offer["published_at"], "notes_url": offer["notes_url"],
+        })
 
 
 if __name__ == "__main__":

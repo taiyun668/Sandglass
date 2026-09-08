@@ -825,7 +825,10 @@ it as a release blocker, and do not make it green.
     organization/project/policy variables. The workflow forbids inventing
     those.
 - [ ] Authenticode-sign every shipped executable component, installer and uninstaller with SHA-256 and a trusted timestamp.
-- [ ] Sign update manifests and payloads; reject unsigned or mismatched updates.
+- [x] Sign `SHA256SUMS.windows` with the Owner-held ECDSA P-256 release key;
+  verify the embedded public key, manifest signature and installer digest before
+  launch, and reject a missing signature or mismatched payload. Authenticode
+  remains a separate future publisher-trust layer.
 - [ ] Decide whether to register a Microsoft Store developer account and publish an MSIX channel.
 - [ ] Test Smart App Control, SmartScreen, WDAC/App Control for Business and AppLocker on clean machines.
 - [x] Distinguish an in-process native UI component blocked by Windows policy from a provider account disconnect in the UI, loopback API and `sandglass doctor`; persist only redacted Sandglass-owned diagnostics.
@@ -907,6 +910,16 @@ Relevant Microsoft guidance:
   only `/v1/logs` there, and remove the receiver again when the user disables it.
 - [x] Preserve `SANDGLASS_HOME` on uninstall while removing the app's own
   start-at-login registry value, shortcuts and application registration.
+- [x] Give the signed-manifest update path a complete desktop lifecycle: show
+  the top-left update control only when an offer exists, expose its action on
+  hover and keyboard focus, require an accessible confirmation, then hand off
+  to a visible progress-only NSIS update mode. The installer waits for the
+  exact parent process, stages before replacement, restores the prior install
+  on failure, restarts on success, and the new version shows its release notes
+  once. Startup checks use the six-hour cache; a running panel performs a fresh
+  metadata-only check every six hours and never downloads before confirmation.
+  Portable copies intentionally update into the current-user installed channel;
+  their original directory is not removed.
 - [ ] Complete accessibility, localization, DPI/multi-monitor and keyboard-navigation checks.
   - [x] Preserve keyboard focus across dynamic tab and account-picker renders;
     expose the active provider with `aria-current` and return focus on Escape.

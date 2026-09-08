@@ -5,6 +5,7 @@ SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 !include "x64.nsh"
 
 !ifndef APPVERSION
@@ -31,6 +32,12 @@ SetCompressor /SOLID lzma
   !endif
 !endif
 
+Var UpdateMode
+Var UpdateParentPid
+Var UpdateBackup
+Var UpdateStage
+Var UpdateRestartExe
+
 Name "Sandglass"
 OutFile "${ARTIFACTDIR}\${ARTIFACTNAME}.exe"
 InstallDir "$LOCALAPPDATA\Programs\Sandglass"
@@ -49,11 +56,16 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\sandglass\web\assets\orb.ico"
 !define MUI_UNICON "..\sandglass\web\assets\orb.ico"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_LICENSE "..\LICENSE"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_DIRECTORY
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW UpdateInstFilesShow
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Sandglass.exe"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_FINISH
 !ifndef IMPORT_UNINST
   !insertmacro MUI_UNPAGE_CONFIRM
@@ -65,8 +77,109 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 !insertmacro MUI_LANGUAGE "TradChinese"
 
 Function .onInit
+  StrCpy $UpdateMode 0
+  ${GetParameters} $R9
+  ClearErrors
+  ${GetOptions} "$R9" "/UPDATE" $R8
+  ${IfNot} ${Errors}
+    StrCpy $UpdateMode 1
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} "$R9" "/PARENTPID=" $UpdateParentPid
+  ClearErrors
+  ${GetOptions} "$R9" "/RESTARTEXE=" $UpdateRestartExe
+  ${If} $UpdateMode == 1
+    ; Canonicalize the PID before it becomes part of the staging path. Besides
+    ; rejecting a broken protocol, this prevents command-line path injection
+    ; into the only recursive cleanup used before installation.
+    IntOp $R7 $UpdateParentPid + 0
+    ${If} $R7 <= 0
+      SetErrorLevel 20
+      Abort
+    ${EndIf}
+    StrCpy $UpdateParentPid $R7
+  ${EndIf}
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "Sandglass currently requires 64-bit Windows."
+    ${If} $UpdateMode == 1
+      SetErrorLevel 21
+    ${Else}
+      MessageBox MB_ICONSTOP "Sandglass currently requires 64-bit Windows."
+    ${EndIf}
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function UpdateSkipPage
+  ${If} $UpdateMode == 1
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function UpdateInstFilesShow
+  ${If} $UpdateMode == 1
+    ; The update is unattended after the user confirmed it in Sandglass. A
+    ; Cancel button here would leave the product stopped and the old directory
+    ; potentially renamed, so make the progress page non-cancellable.
+    GetDlgItem $0 $HWNDPARENT 2
+    EnableWindow $0 0
+    System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r1'
+    ${If} $1 != 0
+      System::Call 'user32::EnableMenuItem(p r1, i 0xF060, i 0x1)'
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function WaitForUpdateParent
+  ${If} $UpdateMode != 1
+    Return
+  ${EndIf}
+  ${If} $UpdateParentPid == ""
+    Call UpdateFailure
+  ${EndIf}
+  ; A PID alone is not a synchronization primitive. Open the actual process
+  ; handle, then wait for the process that launched this updater to exit.
+  System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdateParentPid) p .r0 ? e'
+  Pop $2
+  ${If} $0 == 0
+    ; ERROR_INVALID_PARAMETER means the parent already exited between launch
+    ; and OpenProcess. That is the state the wait was meant to establish.
+    ${If} $2 == 87
+      Return
+    ${EndIf}
+    Call UpdateFailure
+  ${EndIf}
+  System::Call 'kernel32::WaitForSingleObject(p r0, i 0xFFFFFFFF) i .r1'
+  System::Call 'kernel32::CloseHandle(p r0)'
+  ${If} $1 != 0
+    SetErrorLevel 20
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function UpdateFailure
+  ; Update mode has no attended user to dismiss a modal dialog. Restore the
+  ; complete old directory when it was moved aside, then start that old copy.
+  ${If} $UpdateMode == 1
+    ${If} $UpdateStage != ""
+      RMDir /r "$UpdateStage"
+    ${EndIf}
+    ${If} $UpdateBackup != ""
+      ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
+        Rename "$UpdateBackup" "$INSTDIR"
+      ${EndIf}
+      ${If} ${FileExists} "$INSTDIR\Sandglass.exe"
+        Exec '"$INSTDIR\Sandglass.exe"'
+      ${ElseIf} ${FileExists} "$UpdateBackup\Sandglass.exe"
+        Exec '"$UpdateBackup\Sandglass.exe"'
+      ${EndIf}
+    ${ElseIf} $UpdateRestartExe != ""
+      ${If} ${FileExists} "$UpdateRestartExe"
+        ; Portable-to-installed update failure: restart the original portable
+        ; executable. Never mistake a partly extracted target for the old app.
+        Exec '"$UpdateRestartExe"'
+      ${EndIf}
+    ${EndIf}
+    SetErrorLevel 20
     Abort
   ${EndIf}
 FunctionEnd
@@ -98,6 +211,8 @@ FunctionEnd
 Section "Sandglass" SecMain
   SetShellVarContext current
 
+  Call WaitForUpdateParent
+
   ; The observer is a second detached copy of Sandglass.exe. It holds the files
   ; about to be replaced, and File /r over a locked target leaves whichever
   ; pieces could be written next to the ones that could not -- an install the
@@ -113,7 +228,9 @@ Section "Sandglass" SecMain
     ; nothing about the detached observer the comment above names as the holder.
     ExecWait '"$R0\Sandglass.exe" --stop' $0
     ${If} $0 != 0
-      ${If} ${Silent}
+      ${If} $UpdateMode == 1
+        Call UpdateFailure
+      ${ElseIf} ${Silent}
         SetErrorLevel 2
       ${Else}
         MessageBox MB_ICONSTOP "Sandglass could not confirm that its background observer stopped. Quit Sandglass from the tray icon and run this installer again."
@@ -126,14 +243,18 @@ Section "Sandglass" SecMain
     Call CheckSandglassMutex
     Pop $R1
     ${If} $R1 == "held"
-      ${If} ${Silent}
+      ${If} $UpdateMode == 1
+        Call UpdateFailure
+      ${ElseIf} ${Silent}
         SetErrorLevel 2
       ${Else}
         MessageBox MB_ICONSTOP "Sandglass's background observer is still running. Quit Sandglass from the tray icon and run this installer again."
       ${EndIf}
       Abort
     ${ElseIf} $R1 != "free"
-      ${If} ${Silent}
+      ${If} $UpdateMode == 1
+        Call UpdateFailure
+      ${ElseIf} ${Silent}
         SetErrorLevel 3
       ${Else}
         MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass's background observer is running. The installer will not replace it."
@@ -149,7 +270,9 @@ Section "Sandglass" SecMain
     Pop $2
     ${If} $1 != 0
       System::Call 'kernel32::CloseHandle(p r1)'
-      ${If} ${Silent}
+      ${If} $UpdateMode == 1
+        Call UpdateFailure
+      ${ElseIf} ${Silent}
         SetErrorLevel 2
       ${Else}
         MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run this installer again."
@@ -157,7 +280,9 @@ Section "Sandglass" SecMain
       Abort
     ${Else}
       ${If} $2 != 2
-        ${If} ${Silent}
+        ${If} $UpdateMode == 1
+          Call UpdateFailure
+        ${ElseIf} ${Silent}
           SetErrorLevel 3
         ${Else}
           MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass is still running. The installer will not replace it."
@@ -169,7 +294,9 @@ Section "Sandglass" SecMain
     ClearErrors
     Rename "$R0\Sandglass.exe" "$R0\Sandglass.exe.replacing"
     ${If} ${Errors}
-      ${If} ${Silent}
+      ${If} $UpdateMode == 1
+        Call UpdateFailure
+      ${ElseIf} ${Silent}
         ; A self-update reaches here: the panel asked for it and has already
         ; quit. /S does not suppress MessageBox, so a modal here would be a
         ; detached installer waiting on a dialog nobody is looking for. This
@@ -185,8 +312,52 @@ Section "Sandglass" SecMain
     Rename "$R0\Sandglass.exe.replacing" "$R0\Sandglass.exe"
   ${EndIf}
 
-  SetOutPath "$INSTDIR"
+  ${If} $UpdateMode == 1
+    ; Extract away from both the running source and the install target. This
+    ; makes a portable-to-installed update safe and keeps a failed extraction
+    ; from leaving a half-new installed directory.
+    StrCpy $UpdateStage "$TEMP\Sandglass-update-$UpdateParentPid"
+    ${If} ${FileExists} "$UpdateStage\*.*"
+      Call UpdateFailure
+    ${EndIf}
+    CreateDirectory "$UpdateStage"
+    SetOutPath "$UpdateStage"
+  ${Else}
+    SetOutPath "$INSTDIR"
+  ${EndIf}
   File /r "${SOURCEDIR}\*"
+
+  ${If} ${Errors}
+    Call UpdateFailure
+  ${EndIf}
+
+  ${If} $UpdateMode == 1
+    ; Only an actual prior Sandglass install is moved aside. An empty registry
+    ; value is the normal portable-to-installed path and is never a delete or
+    ; rename target.
+    ${If} $R0 != ""
+      ${AndIf} ${FileExists} "$R0\Sandglass.exe"
+      StrCpy $UpdateBackup "$INSTDIR.update-backup"
+      ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
+        Call UpdateFailure
+      ${EndIf}
+      ClearErrors
+      Rename "$INSTDIR" "$UpdateBackup"
+      ${If} ${Errors}
+        Call UpdateFailure
+      ${EndIf}
+    ${Else}
+      ; Rename can only create a new install directory. Refuse to merge into an
+      ; unrelated non-empty directory chosen by stale external state.
+      RMDir "$INSTDIR"
+    ${EndIf}
+    ClearErrors
+    Rename "$UpdateStage" "$INSTDIR"
+    ${If} ${Errors}
+      Call UpdateFailure
+    ${EndIf}
+    StrCpy $UpdateStage ""
+  ${EndIf}
 
   CreateDirectory "$SMPROGRAMS\Sandglass"
   CreateShortcut "$SMPROGRAMS\Sandglass\Sandglass.lnk" "$INSTDIR\Sandglass.exe" "" "$INSTDIR\Sandglass.exe"
@@ -203,10 +374,20 @@ Section "Sandglass" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair" 1
 
+  ${If} $UpdateMode == 1
+    ${If} $UpdateBackup != ""
+      RMDir /r "$UpdateBackup"
+    ${EndIf}
+  ${EndIf}
+
   ; MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws. Without this
   ; the in-app update installs correctly and ends with no Sandglass running:
   ; the user clicks update, the panel disappears, and nothing comes back.
-  ${If} ${Silent}
+  ${If} $UpdateMode == 1
+    ; /UPDATE intentionally keeps the InstFiles progress window visible, so it
+    ; is not ${Silent}; relaunch explicitly when that page has completed.
+    Exec '"$INSTDIR\Sandglass.exe"'
+  ${ElseIf} ${Silent}
     Exec '"$INSTDIR\Sandglass.exe"'
   ${EndIf}
 SectionEnd

@@ -3,10 +3,9 @@
 Two things this deliberately will not do. It never downloads during a check, so
 opening the panel costs one small request and nothing else. And it never runs an
 installer it cannot vouch for: the release has to publish a checksum file beside
-the installer, the download has to match it, and the file has to carry a
-signature Windows itself trusts. The project's own release doctrine says an
-unsigned build is an internal candidate and not a public artifact; an updater
-that would execute one anyway makes that doctrine decorative.
+the installer, the download has to match it, and the file has to carry either a
+trusted Windows signature or the project's signed release manifest. The latter
+is the release identity used by the public unsigned installer route.
 
 Nothing here can offer anything until a release exists to find. That is the
 correct dark state, not a failure.
@@ -20,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -45,9 +45,7 @@ CHECKSUMS_NAME = "SHA256SUMS.windows"
 CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.windows.sig"
 
 # P-256 X||Y, hex, from the Owner's release key. The private half is not in
-# this repository and never will be. Empty until the first key is published:
-# with no key there is nothing to check a manifest against, so a release must
-# then carry an Authenticode signature Windows trusts, exactly as before.
+# this repository and never will be.
 RELEASE_PUBLIC_KEY = "21D35013DCA960BAE23B6A0C7CF08A79C888A45C0375F67A01D4FABA8E1A4B1E853FAA6A9C09D380272A2980AF44914CE109E07446A734BD7F3BC2A14D2D7EBA"
 
 _LOCK = threading.RLock()
@@ -138,6 +136,9 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
         "manifest_signed": manifest_signed,
         "published_at": str(release.get("published_at") or ""),
         "notes_url": str(release.get("html_url") or ""),
+        # GitHub's release body is already plain text. Keep it as text rather
+        # than attempting to interpret Markdown/HTML in the dashboard.
+        "notes": release.get("body") if isinstance(release.get("body"), str) else "",
     }
 
 
@@ -239,12 +240,16 @@ def available_update(force: bool = False) -> dict[str, Any]:
         except (urllib.error.URLError, OSError, ValueError) as exc:
             error = type(exc).__name__
         try:
-            _write_state({
+            next_state = dict(stored)
+            next_state.update({
                 "checked_at": datetime.now(timezone.utc).isoformat(),
                 "current_version": __version__,
                 "offer": offer,
                 "error": error,
             })
+            # A successful check must not erase the announcement waiting for
+            # the first launch of the version it belongs to.
+            _write_state(next_state)
         except OSError:
             return offer
         return offer
@@ -340,15 +345,69 @@ def apply_update(offer: dict[str, Any]) -> dict[str, Any]:
 
     The installer refuses to write over a running copy, so this does not wait
     for it: it starts the installer detached and returns, and the caller quits.
-    The installer relaunches Sandglass when it is done.
+    The installer relaunches Sandglass when it is done. The verified release
+    metadata is retained until that new version has shown its announcement.
     """
     name = str(offer.get("asset") or "sandglass-setup.exe")
     staged = Path(tempfile.gettempdir()) / "sandglass-update" / name
     download_verified(offer, staged)
+    version = str(offer.get("version") or "")
+    if not version:
+        raise ValueError("the release did not publish a version")
+    with _LOCK:
+        stored = _read_state()
+        next_state = dict(stored)
+        next_state["pending_announcement"] = {
+            "version": version,
+            "notes": offer.get("notes") if isinstance(offer.get("notes"), str) else "",
+            "published_at": str(offer.get("published_at") or ""),
+            "notes_url": str(offer.get("notes_url") or ""),
+        }
+        _write_state(next_state)
     subprocess.Popen(
-        [str(staged), "/S"],
+        [
+            str(staged),
+            "/UPDATE",
+            f"/PARENTPID={os.getpid()}",
+            f"/RESTARTEXE={Path(sys.executable).resolve()}",
+        ],
         creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | NEW_PROCESS_GROUP
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         close_fds=True,
     )
-    return {"ok": True, "version": str(offer.get("version") or ""), "staged": str(staged)}
+    return {"ok": True, "version": version, "staged": str(staged)}
+
+
+def update_announcement() -> dict[str, Any]:
+    """Return the current version's one-time release announcement, if any."""
+    with _LOCK:
+        try:
+            stored = _read_state()
+        except (OSError, ValueError) as exc:
+            record_component_failure("update_state_write", exc)
+            return {}
+    pending = stored.get("pending_announcement")
+    if not isinstance(pending, dict) or pending.get("version") != __version__:
+        return {}
+    return dict(pending)
+
+
+def dismiss_update_announcement(version: str) -> dict[str, Any]:
+    """Dismiss only the named version's announcement; never a newer one."""
+    version = str(version or "")
+    with _LOCK:
+        try:
+            stored = _read_state()
+        except (OSError, ValueError) as exc:
+            record_component_failure("update_state_write", exc)
+            return {"ok": False, "dismissed": False}
+        pending = stored.get("pending_announcement")
+        if not isinstance(pending, dict) or pending.get("version") != version:
+            return {"ok": False, "dismissed": False}
+        next_state = dict(stored)
+        next_state.pop("pending_announcement", None)
+        try:
+            _write_state(next_state)
+        except OSError:
+            return {"ok": False, "dismissed": False}
+    return {"ok": True, "dismissed": True, "version": version}

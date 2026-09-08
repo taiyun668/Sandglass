@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import tomllib
@@ -687,24 +688,56 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertTrue(self._exec_lines(guard, "$R0"),
                         "锁住而中止时必须把旧版本拉回来，不能让用户手上什么都没有")
 
-    def test_the_updater_and_the_installer_agree_on_the_silent_flag(self):
+    def test_the_updater_and_the_installer_agree_on_the_update_protocol(self):
         """The two halves live in different files and must not drift apart.
 
         Asserted on the argv the updater actually builds, not on the source
         text: FEED_URL contains "/Sandglass/", so searching the file for "/S"
         matches the URL and passes with the flag removed.
         """
-        from unittest.mock import patch
-
         from sandglass import update
 
         seen = []
-        with patch.object(update, "download_verified", lambda offer, into: into),                 patch("subprocess.Popen", lambda args, **kw: seen.append(args)):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"SANDGLASS_HOME": tmp}), \
+                mock.patch.object(update, "download_verified", lambda offer, into: into), \
+                mock.patch("subprocess.Popen", lambda args, **kw: seen.append(args)):
             update.apply_update({"asset": "s-setup.exe", "version": "9.9.9"})
         self.assertTrue(seen, "更新器必须启动安装器")
-        self.assertIn("/S", seen[0], "更新器必须以静默方式启动安装器")
-        self.assertIn("${Silent}", self._section(SECMAIN),
-                      "安装器必须处理更新器实际传的那个模式")
+        self.assertIn("/UPDATE", seen[0], "更新器必须使用专用更新模式")
+        self.assertTrue(any(arg.startswith("/PARENTPID=") for arg in seen[0]))
+        self.assertTrue(any(arg.startswith("/RESTARTEXE=") for arg in seen[0]))
+        section = self._section(SECMAIN)
+        self.assertIn("/UPDATE", self._nsi())
+        self.assertIn("WaitForSingleObject", self._nsi())
+        self.assertIn("UpdateInstFilesShow", self._nsi())
+        self.assertIn("${Silent}", section,
+                      "普通 /S 安装仍必须保留现有静默路径")
+
+    def test_update_mode_has_a_complete_rollback_before_copying_files(self):
+        section = self._section(SECMAIN)
+        write = section.index('File /r "${SOURCEDIR}')
+        backup = section.index('Rename "$INSTDIR" "$UpdateBackup"')
+        activate = section.index('Rename "$UpdateStage" "$INSTDIR"')
+        self.assertLess(write, backup, "新版本必须先完整解到 staging")
+        self.assertLess(backup, activate, "旧安装备份后才能激活新版本")
+        self.assertIn('Rename "$UpdateBackup" "$INSTDIR"', self._nsi())
+        self.assertNotIn('RMDir /r "$R0"', self._nsi())
+
+    def test_portable_update_never_uses_an_empty_install_registry_path(self):
+        section = self._section(SECMAIN)
+        activation = section[section.index('File /r "${SOURCEDIR}') :]
+        self.assertIn('${If} $R0 != ""', activation)
+        self.assertIn('Rename "$UpdateStage" "$INSTDIR"', activation)
+        self.assertIn('Exec \'"$UpdateRestartExe"\'', self._nsi())
+        self.assertIn('${If} $UpdateBackup != ""', activation)
+
+    def test_update_staging_path_uses_only_a_canonical_numeric_parent_pid(self):
+        nsi = self._nsi()
+        canonicalize = nsi.index('IntOp $R7 $UpdateParentPid + 0')
+        stage = nsi.index('StrCpy $UpdateStage "$TEMP\\Sandglass-update-$UpdateParentPid"')
+        self.assertLess(canonicalize, stage)
+        self.assertIn('${If} $R7 <= 0', nsi[canonicalize:stage])
 
     def test_uninstall_stops_observing_before_deleting(self):
         section = self._section('Section "Uninstall"')
