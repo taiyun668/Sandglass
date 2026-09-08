@@ -328,8 +328,10 @@ class ReleaseMetadataTests(unittest.TestCase):
         script = (ROOT / "tools" / "smoke_windows_update.ps1").read_text(encoding="utf-8")
 
         self.assertIn("[Parameter(Mandatory = $true)]\n    [string]$ExpectedGitCommit", script)
-        self.assertIn("Get-FileHash -LiteralPath $oldInstallerPath -Algorithm SHA256", script)
-        self.assertIn("Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop", script)
+        self.assertIn("function Get-Sha256", script)
+        self.assertIn("[Security.Cryptography.SHA256]::Create()", script)
+        self.assertIn("$oldInstallerHash = Get-Sha256 $oldInstallerPath", script)
+        self.assertNotIn("Get-FileHash", script)
         self.assertIn("$oldInstallerHash -eq $newInstallerHash", script)
         self.assertIn('$afterDelete = Invoke-Reg "query" $Key', script)
         self.assertIn("Could not prove originally absent registry key", script)

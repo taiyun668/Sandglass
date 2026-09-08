@@ -9,10 +9,17 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# Windows PowerShell normally auto-loads Get-FileHash from this module, but a
-# clean non-interactive -File host on the maintenance machine did not. Make the
-# dependency explicit before the first release-artifact measurement.
-Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+
+function Get-Sha256([string]$Path) {
+    $stream = [IO.File]::OpenRead((Get-FullPath $Path))
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace("-", "")
+    } finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
 
 function Get-FullPath([string]$Path) {
     return [System.IO.Path]::GetFullPath($Path)
@@ -28,8 +35,8 @@ foreach ($path in @($oldInstallerPath, $newInstallerPath)) {
 if ($oldInstallerPath.Equals($newInstallerPath, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OldInstaller and NewInstaller must be different files."
 }
-$oldInstallerHash = (Get-FileHash -LiteralPath $oldInstallerPath -Algorithm SHA256).Hash
-$newInstallerHash = (Get-FileHash -LiteralPath $newInstallerPath -Algorithm SHA256).Hash
+$oldInstallerHash = Get-Sha256 $oldInstallerPath
+$newInstallerHash = Get-Sha256 $newInstallerPath
 if ($oldInstallerHash -eq $newInstallerHash) {
     throw "OldInstaller and NewInstaller have the same SHA256; an update cannot be proven."
 }
@@ -86,7 +93,7 @@ function Get-TreeSnapshot([string]$Root) {
                 $result[$relative] = [ordered]@{
                     Type = "File"
                     Length = $item.Length
-                    SHA256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+                    SHA256 = Get-Sha256 $item.FullName
                 }
             }
         }
