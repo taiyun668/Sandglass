@@ -1,0 +1,66 @@
+name: Feature request
+description: Propose a change and explain how it would affect Sandglass's read-only product boundary.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to describe a **problem or use case** and how a change would affect the **Sandglass product boundary**.
+
+        Sandglass is a read-only local usage dashboard. It discovers official local accounts and shows Token usage, official remaining quota, and reset times. It does **not** switch accounts, refresh credentials, write inside provider directories, import third-party account stores, estimate missing history, or reconcile bills.
+
+        ## Do not attach private data
+
+        Public issues are visible to everyone. **Do not upload or paste any of the following:**
+
+        - `auth.json` or `.credentials.json`
+        - provider directories (`~/.claude`, `~/.codex`, `~/.grok`)
+        - raw provider logs
+        - prompts or conversation content
+        - account emails or account IDs
+        - tokens or other credentials
+        - screenshots that show identity
+        - the `SANDGLASS_HOME` database or its files
+
+        Describe the need with synthetic examples only.
+
+        ## Security reports are not public issues
+
+        Do **not** use this form for a vulnerability. Use [private vulnerability reporting](https://github.com/taiyun668/Sandglass/security/advisories/new) and read [SECURITY.md](https://github.com/taiyun668/Sandglass/blob/main/SECURITY.md). For supported scope, see [SUPPORT.md](https://github.com/taiyun668/Sandglass/blob/main/SUPPORT.md).
+  - type: textarea
+    id: problem-use-case
+    attributes:
+      label: Problem / use case
+      description: What you cannot do today, and in which situation. Describe the need, not an implementation. Use synthetic examples only.
+      placeholder: |
+        When I open Sandglass after using only the official client on this computer, I need to…
+    validations:
+      required: true
+  - type: textarea
+    id: boundary-impact
+    attributes:
+      label: Product-boundary impact
+      description: |
+        Explain how the request would affect the Sandglass product boundary.
+
+        In particular, say whether it can be satisfied with existing official local evidence, or whether it would require one or more of the following: switching accounts, refreshing credentials, writing inside `~/.claude`, `~/.codex`, or `~/.grok`, importing a third-party account store, estimating missing history, reading a source Sandglass does not support, or reconciling a bill.
+
+        If you do not know, say which boundary questions are unanswered. Do not assume Sandglass can guess missing data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Private data and security
+      description: Confirm before submitting. The full forbidden list is at the top of this form.
+      options:
+        - label: I did not attach auth.json, .credentials.json, tokens, or provider directories.
+          required: true
+        - label: I did not attach raw provider logs, prompts, or the SANDGLASS_HOME database.
+          required: true
+        - label: I removed account emails, IDs, and identity from text and screenshots.
+          required: true
+        - label: This is not a security report. Security issues use private reporting only.
+          required: true

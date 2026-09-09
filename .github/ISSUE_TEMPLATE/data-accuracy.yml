@@ -1,0 +1,130 @@
+name: Data accuracy
+description: Report a displayed account, usage, or quota value that does not match a source you observed directly.
+title: "[Data accuracy] "
+labels:
+  - data-accuracy
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when Sandglass **displayed a value** that does not match a **source you observed directly**.
+
+        Account discovery, local usage, and official quota are **separate capabilities**. Do not treat them as one number.
+
+        ## Do not guess
+
+        Report only what you saw. Do **not** estimate missing history, infer ownership from the current sign-in, convert quota percentages into Token counts, or use a bill or invoice as a comparison.
+
+        If you did not directly observe a comparison source, say so. Leave the comparison empty of invented numbers.
+
+        ## Do not attach private data
+
+        Public issues are visible to everyone. **Do not upload or paste any of the following:**
+
+        - `auth.json` or `.credentials.json`
+        - provider directories (`~/.claude`, `~/.codex`, `~/.grok`)
+        - raw provider logs
+        - prompts or conversation content
+        - account emails or account IDs
+        - tokens or other credentials
+        - screenshots that show identity
+        - the `SANDGLASS_HOME` database or its files
+
+        Copy numbers as text after removing identity. Do not attach a screenshot that shows an email, account ID, or avatar.
+
+        ## Security reports are not public issues
+
+        Do **not** use this form for a vulnerability. Use [private vulnerability reporting](https://github.com/taiyun668/Sandglass/security/advisories/new) and read [SECURITY.md](https://github.com/taiyun668/Sandglass/blob/main/SECURITY.md). For supported scope, see [SUPPORT.md](https://github.com/taiyun668/Sandglass/blob/main/SUPPORT.md).
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      description: The provider of the displayed value. If more than one is involved, choose "More than one" and name each provider in the fields below. Do not guess a provider you did not see.
+      options:
+        - Claude
+        - Codex
+        - Grok
+        - More than one
+    validations:
+      required: true
+  - type: dropdown
+    id: capability
+    attributes:
+      label: Capability
+      description: |
+        Which Sandglass capability the displayed value belongs to.
+
+        - Account discovery: which accounts Sandglass found on this computer
+        - Local usage: Token totals from official local records on this computer
+        - Official quota: provider remaining-quota bars and reset times, which may include other devices
+      options:
+        - Account discovery
+        - Local usage
+        - Official quota
+        - More than one
+    validations:
+      required: true
+  - type: dropdown
+    id: attribution-mode
+    attributes:
+      label: Attribution mode
+      description: The Account and tool mode selected in Sandglass when you saw the value. This is a setting you can read in the app. Do not infer a mode from the numbers.
+      options:
+        - "One account · official tools only"
+        - Complex scenarios (Adapter Skill path)
+        - Not chosen yet
+        - I did not look it up
+    validations:
+      required: true
+  - type: input
+    id: time-window
+    attributes:
+      label: Time window
+      description: Copy the window label Sandglass was showing. Do not convert it to another window or estimate a range you did not see.
+      placeholder: 5 hours
+    validations:
+      required: true
+  - type: textarea
+    id: displayed-value
+    attributes:
+      label: Displayed value
+      description: Copy the value Sandglass showed, including units and any status text such as Unassigned or unavailable. Copy it as shown. Do not recalculate it.
+      placeholder: Official quota, 5 hours, 37% used, 63% remaining, reset at 14:32
+    validations:
+      required: true
+  - type: textarea
+    id: comparison-source
+    attributes:
+      label: Directly observed comparison source
+      description: |
+        A comparison is valid only if you saw it yourself, at the same time, on an official client or first-party quota screen.
+
+        State which official surface you looked at, the value it showed, and when you observed it.
+
+        If you did not directly observe a comparison source, write exactly: `No direct comparison observed.`
+
+        Do not estimate. Do not use a bill, invoice, memory, or the currently signed-in account to fill a gap.
+      placeholder: |
+        Official Claude desktop quota screen at 14:32 local time showed 37% used for the 5-hour window.
+
+        or
+
+        No direct comparison observed.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Private data, guesses, and security
+      description: Confirm before submitting. The full forbidden list is at the top of this form.
+      options:
+        - label: I did not attach auth.json, .credentials.json, tokens, or provider directories.
+          required: true
+        - label: I did not attach raw provider logs, prompts, or the SANDGLASS_HOME database.
+          required: true
+        - label: I removed account emails, IDs, and identity from text and screenshots.
+          required: true
+        - label: Every number I reported was directly observed. I did not guess or backfill.
+          required: true
+        - label: This is not a security report. Security issues use private reporting only.
+          required: true

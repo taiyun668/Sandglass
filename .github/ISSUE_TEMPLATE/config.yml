@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/taiyun668/Sandglass/security/advisories/new
+    about: Use private GitHub vulnerability reporting. Do not open a public issue or attach credentials.
+  - name: Security policy (SECURITY.md)
+    url: https://github.com/taiyun668/Sandglass/blob/main/SECURITY.md
+    about: Supported versions, reporting rules, and Sandglass security boundaries.
+  - name: Supported scope (SUPPORT.md)
+    url: https://github.com/taiyun668/Sandglass/blob/main/SUPPORT.md
+    about: Supported capabilities, expected limits, and how to collect redacted diagnostics.

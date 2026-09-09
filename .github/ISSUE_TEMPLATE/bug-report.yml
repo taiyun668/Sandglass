@@ -1,0 +1,125 @@
+name: Bug report
+description: Report a non-sensitive Sandglass defect. Do not attach credentials, provider files, or identity.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only for a **reproducible, non-sensitive** Sandglass problem.
+
+        ## Do not attach private data
+
+        Public issues are visible to everyone. **Do not upload or paste any of the following:**
+
+        - `auth.json` or `.credentials.json`
+        - provider directories (`~/.claude`, `~/.codex`, `~/.grok`)
+        - raw provider logs
+        - prompts or conversation content
+        - account emails or account IDs
+        - tokens or other credentials
+        - screenshots that show identity
+        - the `SANDGLASS_HOME` database or its files
+
+        Before pasting diagnostics, remove or replace emails, account identifiers, user names, and local paths.
+
+        ## Security reports are not public issues
+
+        Do **not** use this form for a vulnerability or for credential handling, provider-directory writes, or exposure outside local loopback. Use [private vulnerability reporting](https://github.com/taiyun668/Sandglass/security/advisories/new) and read [SECURITY.md](https://github.com/taiyun668/Sandglass/blob/main/SECURITY.md).
+
+        For supported scope and redacted diagnostics, see [SUPPORT.md](https://github.com/taiyun668/Sandglass/blob/main/SUPPORT.md).
+  - type: input
+    id: sandglass-version
+    attributes:
+      label: Sandglass version
+      description: Output of `sandglass --version`, or the version shown in the app.
+      placeholder: sandglass 0.1.5
+    validations:
+      required: true
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: Install type
+      description: How this copy of Sandglass was installed.
+      options:
+        - Installer
+        - Portable
+        - Source
+    validations:
+      required: true
+  - type: input
+    id: os-build
+    attributes:
+      label: OS and build
+      description: Operating system name, version, and build. The current release-tested desktop product is Windows.
+      placeholder: Windows 11 24H2, OS build 26100
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happened
+      description: The Sandglass surface that showed the problem.
+      options:
+        - Desktop panel
+        - Floating orb
+        - Tray
+        - Command-line interface
+        - Browser dashboard
+        - Installer or update
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Reproduction steps
+      description: Numbered steps another person can follow. Use synthetic data only. Do not include real prompts, account identifiers, or provider log files.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What Sandglass should have done or shown.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What Sandglass did or showed instead. Include the exact visible error text if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: redacted-diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: |
+        Paste redacted output of `sandglass doctor`. You may also paste redacted in-app component status.
+
+        Before pasting, replace emails, account identifiers, user names, and local paths with placeholders such as `[email]`, `[account]`, `[user]`, and `[path]`. Do not attach files from `SANDGLASS_HOME`.
+      placeholder: |
+        sandglass doctor
+          [redacted output]
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Private data and security
+      description: Confirm before submitting. The full forbidden list is at the top of this form.
+      options:
+        - label: I did not attach auth.json, .credentials.json, tokens, or provider directories.
+          required: true
+        - label: I did not attach raw provider logs, prompts, or the SANDGLASS_HOME database.
+          required: true
+        - label: I removed account emails, IDs, and identity from text and screenshots.
+          required: true
+        - label: This is not a security report. Security issues use private reporting only.
+          required: true
