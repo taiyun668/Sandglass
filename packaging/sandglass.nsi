@@ -346,8 +346,17 @@ Function WaitForUpdateReady
   ; WaitForMultipleObjects distinguishes the one-shot UI event from an early
   ; process exit and from a timeout. The event is installer-created and named
   ; by a random per-attempt token, so readiness is never inferred from a file.
+  ; Probe each handle with the same API family before aggregating them. These
+  ; zero waits do not consume the manual-reset event or terminate the child;
+  ; their raw results make an invalid-handle failure attributable instead of
+  ; collapsing every unexpected wait result into `ready-wait`.
+  System::Call 'kernel32::WaitForSingleObject(p $UpdateReadyHandle, i 0) i .r3 ? e'
+  Pop $R4
+  System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .r5 ? e'
+  Pop $R6
   System::Call "*(p $UpdateReadyHandle, p $UpdateChildHandle) p .R0"
-  System::Call 'kernel32::WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1'
+  System::Call 'kernel32::WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1 ? e'
+  Pop $R2
   System::Free $R0
   ${If} $R1 == 0
     ; If the event and child became signaled together, the lower array index
@@ -367,7 +376,7 @@ Function WaitForUpdateReady
     StrCpy $UpdatePhase "ready-timeout"
     Call UpdateFailure
   ${Else}
-    StrCpy $UpdatePhase "ready-wait"
+    StrCpy $UpdatePhase "ready-wait-$R1-e$R2-event$3-e$R4-child$5-e$R6"
     Call UpdateFailure
   ${EndIf}
 FunctionEnd
