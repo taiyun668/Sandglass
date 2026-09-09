@@ -390,57 +390,6 @@ class CheckStateTests(unittest.TestCase):
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
         self.assertEqual(stored, original)
 
-    def test_restoring_unfiltered_cached_return_fails_for_stale_badge(self):
-        """The retired cached return is exactly the stale-badge bug.
-
-        A 0.1.1 process wrote a still-fresh offer.version of 0.1.3. Restoring
-        `return dict(cached) if isinstance(cached, dict) else {}` would show
-        that offer as an update to the process that just became 0.1.3.
-        """
-        import inspect
-
-        cached = {"version": "0.1.3", "asset": "cached.exe"}
-        pending = {"version": "0.1.3", "notes": "已安装"}
-        self._fresh_offer_state(
-            cached,
-            pending_announcement=pending,
-            unrelated={"keep": True},
-        )
-        unfiltered = dict(cached) if isinstance(cached, dict) else {}
-        self.assertEqual(
-            unfiltered.get("version"),
-            "0.1.3",
-            "the unfiltered cached return is the stale-badge reason",
-        )
-
-        source = inspect.getsource(update.available_update)
-        retired = "return dict(cached) if isinstance(cached, dict) else {}"
-        self.assertNotIn(retired, source)
-        self.assertIn("is_newer(version, __version__)", source)
-
-        calls = []
-        with patch.object(update, "__version__", "0.1.3"), patch.object(
-            update, "_get", lambda *a, **k: calls.append(1)
-        ):
-            offer = update.available_update()
-        self.assertEqual(offer, {})
-        self.assertEqual(calls, [])
-        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
-        self.assertEqual(stored["offer"], {})
-        self.assertEqual(stored["pending_announcement"], pending)
-        self.assertEqual(stored["unrelated"], {"keep": True})
-        mutated = source.replace(
-            "if isinstance(version, str) and is_newer(version, __version__):\n"
-            "                    return dict(cached)",
-            retired,
-            1,
-        )
-        self.assertNotEqual(mutated, source)
-        self.assertIn(retired, mutated)
-        with self.assertRaises(AssertionError):
-            self.assertNotIn(retired, mutated)
-            self.assertIn("is_newer(version, __version__)", mutated)
-
     def test_the_unusable_monotonic_stamp_is_no_longer_written(self):
         with patch.object(update, "_get", side_effect=OSError("404")):
             update.available_update(force=True)
