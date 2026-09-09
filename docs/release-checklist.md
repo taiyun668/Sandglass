@@ -3,21 +3,25 @@
 This is the ordered release route. A later item must not weaken an earlier source,
 privacy or correctness boundary.
 
-## Where this stands, and what to do next (2026-09-08)
+## Where this stands, and what to do next (2026-09-09)
 
 The canonical checkout is `D:\Sandglass`, and the product is stopped. The
-release source, tag `v0.1.0-preview.1`, and the public commit it identifies all
-resolve exactly to `8e366dcc48787a5299a5bf7b96f098c061e30c00`.
-The unsigned preview is published. The outside Windows build exited 0 from that
-public commit; all five release assets were verified, and the
-`SHA256SUMS.windows` manifest signature is valid. CI run `34215238877` is green
-with all four jobs successful. SignPath submission steps were skipped; no
+release source and tag `v0.1.1` resolve exactly to
+`7c59d8329b93a6a877da74d34bd85f8b3eff2bfc`.
+The updated unsigned preview is published. All five release assets came from
+CI run `34328424556`; their checksums, build provenance and product-owned path
+manifest were verified, and the Owner-signed `SHA256SUMS.windows` signature is
+valid. All four CI jobs succeeded. The maintenance machine's outside build
+produced the bundle but Windows Application Control blocked the new unsigned
+executable at its runtime self-test, so no local GUI/update smoke is claimed.
+SignPath submission steps were skipped; no
 SignPath account, certificate or sponsor is claimed, and the shipped binaries
 remain unsigned.
 
 The next gates belong to the Owner and a second machine: clean-machine install/
 uninstall, physical UI acceptance, and a real provider-state transition pass.
-The updater's `latest` query intentionally cannot see this pre-release.
+The updater's `latest` query intentionally cannot see this pre-release. Promote
+this same release only after the second-machine gates below pass.
 
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
