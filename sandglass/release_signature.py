@@ -1,20 +1,14 @@
 """Verify that a release manifest was signed by whoever holds this project's key.
 
-Authenticode answers a different question -- does Windows trust the publisher --
-and answering it costs a certificate, which costs either a company or a
-reputation this project does not have yet. The consequence was that
-`download_verified` could not accept any build at all, so the in-app update
-path was dead until the certificate question was settled.
+What an updater has to know is that the bytes it is about to run came from the
+same place the last ones did. A signature over the release manifest answers
+exactly that, with a key the Owner generates and keeps, and Windows verifies it
+through CNG -- no new dependency and no hand-written crypto.
 
-These are separable. What an updater has to know is that the bytes it is about
-to run came from the same place the last ones did. A signature over the release
-manifest answers exactly that, with a key the Owner generates and keeps, and
-Windows verifies it through CNG -- no new dependency, and no hand-written
-crypto: the same shape as `authenticode_valid`, one DLL further down.
-
-It is not a replacement for signing. It says nothing to SmartScreen and nothing
-to a user installing for the first time, who still sees an unknown publisher.
-It removes one thing only: the update channel no longer waits on a certificate.
+It is the update channel's release-identity proof. It says nothing to
+SmartScreen and nothing to a user installing for the first time, who may still
+see an unknown publisher. That first-run Windows behavior is deliberately
+outside this updater's trust decision.
 
 Key format is what .NET's ECDsa hands back for nistP256 -- Q.X and Q.Y, 32
 bytes each, hex, concatenated -- and the signature is the raw r||s pair that

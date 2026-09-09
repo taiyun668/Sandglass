@@ -213,37 +213,35 @@ python -m pip install -r tools/windows-release-requirements.txt
 ```
 
 脚本输出明确带 `unsigned` 的 per-user NSIS 安装包、portable ZIP 和
-CycloneDX runtime SBOM，并统一写入 `SHA256SUMS.windows`。未通过所有可执行组件的 Authenticode 签名、可信时间戳及
-干净机器验收前，这些文件不是稳定版或已签名发布工件；当前公开的预览版明确标为 `unsigned`。
+CycloneDX runtime SBOM，并统一写入 `SHA256SUMS.windows`。当前公开的
+预览版明确标为 `unsigned`；是否进入稳定通道由实际安装、更新和卸载验收决定，
+不等待第三方代码签名服务。
 
 修改解析逻辑时必须同步提升 `sandglass.models.RECORD_FORMAT`，避免旧缓存继续返回旧语义。
 
-## Code signing and update integrity
+## Release and update integrity
 
-**Windows release binaries are not Authenticode-signed yet.** Installing one
-shows an unknown-publisher warning, and Smart App Control may refuse it
+**Windows release binaries are not Authenticode-signed.** Installing one may
+show an unknown-publisher warning, and Smart App Control may refuse it
 outright. That is the honest state; nothing here claims otherwise.
 
-What is protected today is the update path. Every release publishes
+The update path does not require a certificate or a third-party signing
+account. Every release publishes
 `SHA256SUMS.windows` alongside the installer, and the manifest carries an
 ECDSA P-256 signature made with a key the maintainer holds offline. An
 installed copy accepts an update only when the download matches the manifest
-and the manifest carries either that signature or an Authenticode signature
-Windows trusts. Verification uses Windows CNG; there is no additional
-dependency and no hand-written cryptography. The private key is never in this
-repository and never on a CI runner, so publishing a release is an act a person
-performs.
+and the manifest carries that signature. Verification uses Windows CNG; there
+is no additional dependency and no hand-written cryptography. The private key
+is never in this repository and never on a CI runner, so publishing a release
+is an act a person performs.
 
 - Authors, committers and reviewers: [taiyun668](https://github.com/taiyun668)
 - Release signing approver: [taiyun668](https://github.com/taiyun668)
 - Privacy policy: [`PRIVACY.md`](PRIVACY.md)
 
 Windows binaries are built from this repository's public `main` branch on
-GitHub-hosted Actions runners. Where a bundled upstream component already
-carries a valid Microsoft or PSF signature, that signature is preserved rather
-than replaced. The build and signing sequence, including the Authenticode path
-that becomes available once a certificate exists, is documented in
-[`docs/signing-workflow.md`](docs/signing-workflow.md).
+GitHub-hosted Actions runners. The release and updater trust sequence is
+documented in [`docs/release-integrity.md`](docs/release-integrity.md).
 
 ## 许可证
 

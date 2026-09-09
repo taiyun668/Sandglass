@@ -1,17 +1,12 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Installer,
-    [switch]$RequireSigned
+    [string]$Installer
 )
 
 $ErrorActionPreference = "Stop"
 $installerPath = [System.IO.Path]::GetFullPath($Installer)
 if (-not (Test-Path -LiteralPath $installerPath)) {
     throw "Installer not found: $installerPath"
-}
-if ($RequireSigned -and
-    (Get-AuthenticodeSignature -LiteralPath $installerPath).Status -ne "Valid") {
-    throw "Installer does not have a valid Authenticode signature."
 }
 function Assert-MutexAvailable([string]$MutexName, [string]$HeldMessage,
     [string]$UnavailablePrefix) {
@@ -238,13 +233,6 @@ try {
     }
     if (-not (Test-Path -LiteralPath $uninstaller)) {
         throw "Uninstaller is missing."
-    }
-    if ($RequireSigned) {
-        foreach ($signedPath in @((Join-Path $installDir "Sandglass.exe"), $uninstaller)) {
-            if ((Get-AuthenticodeSignature -LiteralPath $signedPath).Status -ne "Valid") {
-                throw "Installed component does not have a valid signature: $signedPath"
-            }
-        }
     }
     $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
         "/S", "_?=$installDir"

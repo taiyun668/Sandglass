@@ -3,9 +3,9 @@
 Generate the Owner's release key, or sign a release manifest with it.
 
 .DESCRIPTION
-The updater accepts a build when Windows trusts its Authenticode signature OR
-when the checksum manifest carries this project's own signature. This produces
-the second one, so the update channel does not wait on a certificate.
+The updater accepts a build only when the checksum manifest carries this
+project's Owner signature. This tool produces that detached signature without
+requiring a certificate or third-party signing account.
 
 The private key is written where you tell it to and nowhere else. It does not
 belong in the repository, in the build tree, or on a build runner: signing is a

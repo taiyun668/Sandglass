@@ -14,9 +14,10 @@ manifest were verified, and the Owner-signed `SHA256SUMS.windows` signature is
 valid. All four CI jobs succeeded. The maintenance machine's outside build
 produced the bundle but Windows Application Control blocked the new unsigned
 executable at its runtime self-test, so no local GUI/update smoke is claimed.
-SignPath submission steps were skipped; no
-SignPath account, certificate or sponsor is claimed, and the shipped binaries
-remain unsigned.
+The dormant third-party Authenticode submission path has been removed from the
+release gate. No certificate, signing-service account or sponsor is required;
+the shipped binaries remain explicit unsigned community packages and automatic
+updates use the Owner-signed checksum manifest.
 
 The next gates belong to the Owner and a second machine: clean-machine install/
 uninstall, physical UI acceptance, and a real provider-state transition pass.
@@ -738,7 +739,8 @@ it as a release blocker, and do not make it green.
   live on the public repository. Corrected to what is true: the binaries are
   not Authenticode-signed, an installer shows an unknown publisher, and what is
   protected is the update path. A sponsor's name goes up if and when that
-  sponsor exists. `docs/signing-workflow.md` now leads with the same fact.
+  sponsor exists. `docs/release-integrity.md` states the current certificate-free
+  release boundary.
   Nothing caught this because no two files had to agree, so now they do:
   `SigningClaimsAgreeTests` fails if the README names a signing sponsor while
   the workflow doc says there is no account, and fails the other way once there
@@ -748,21 +750,17 @@ it as a release blocker, and do not make it green.
   wording when this finding was written; the correction was later published
   without exposing the private maintenance history.
 - [x] The update channel no longer waits on a certificate. `download_verified()`
-  required an Authenticode signature Windows trusts, so with no certificate no
-  build was installable at all -- and the certificate was blocked behind
-  SignPath's reputation requirement, which cannot be met by a project that has
-  never shipped. That deadlock was self-inflicted: what an updater has to know
-  is that these bytes came from the same place the last ones did, and
-  Authenticode answers a different, more expensive question.
-  It now accepts either proof. The second one is an ECDSA P-256 signature over
+  once required an Authenticode signature Windows trusts, so with no certificate
+  no build was installable at all. That deadlock was self-inflicted: what this
+  updater has to know is that these bytes were authorized by the same release
+  identity as the installed copy. It now requires an ECDSA P-256 signature over
   the checksum manifest, made with a key the Owner generates and keeps, and
-  verified through Windows CNG -- no new dependency and no hand-written crypto,
-  the same shape as `authenticode_valid` one DLL further down. The manifest
-  names the installer's digest, so signing it covers the installer.
-  `RELEASE_PUBLIC_KEY` is empty until the Owner publishes one; while it is
-  empty nothing changes. Once set, a release whose manifest is not signed with
-  it is not offered -- an unsigned manifest is either older than the key or not
-  ours. **The Owner's part is one command, once:**
+  verified through Windows CNG -- no new dependency and no hand-written crypto.
+  The manifest names the installer's digest, so signing it covers the installer.
+  `RELEASE_PUBLIC_KEY` was populated when the Owner generated the release key.
+  A release whose manifest is not signed with it is not offered -- an unsigned
+  manifest is either older than the key or not ours. **The Owner's part was one
+  command, once:**
   `tools/sign_release_manifest.ps1 -NewKey`. It generates the key, stores it at
   `%USERPROFILE%\.sandglass\release-key.txt` -- outside the repository and outside
   the build tree -- and writes the matching public key into `sandglass/update.py`
@@ -788,65 +786,23 @@ it as a release blocker, and do not make it green.
   the verifier refuses a changed manifest. The private key stays off this
   repository and off CI, which also keeps every release a deliberate act.
   **What it does not do:** nothing for SmartScreen, nothing for Smart App
-  Control, and nothing for a first-time installer, who still sees an unknown
-  publisher. Signing remains the destination; this removes it from the critical
-  path. Mutation: revert to Authenticode-only and the signed-manifest download
-  is refused with the production error; drop the key-implies-signature rule and
-  an unsigned manifest gets offered while a key is published.
-- [x] Select the owner-controlled code-signing identity and certificate route.
-  **Decided 2026-09-07: SignPath Foundation, and the repository goes public.**
-  Public was not really a choice: `update.py` points its feed at
-  `api.github.com/repos/taiyun668/Sandglass/releases/latest` and the panel's
-  help text, in all six languages, sends users to that same repository for the
-  adapter skill. A private repository leaves both dead. The alternative route,
-  an individually validated certificate, was rejected on two grounds: an
-  ordinary OV certificate requires a legal entity, and every code-signing key
-  issued since 2023 must live on FIPS hardware -- a token to plug in, or a
-  cloud HSM to run -- which puts a manual step inside every release.
-  Prerequisites checked, not assumed: `LICENSE` exists and `pyproject.toml`
-  declares MIT; `.github/workflows/windows-release-gate.yml` already runs the
-  suite, builds the wheel, the unsigned installer, and the inner SignPath
-  payload on `windows-latest`. GitHub origin is
-  `https://github.com/taiyun668/Sandglass`, public, first commit `92e3f81`.
-  The private local `main` was deliberately never pushed; public history was
-  published only from the flattened `public` branch. The Owner completed the
-  irreversible `docs/` review before the first public push. The SignPath
-  application remains the Owner's and is deferred until the project has real
-  users; verify SignPath's current terms on their site rather than from this
-  note.
-  Expectation to set now: signing is not instant trust. Immediate SmartScreen
-  standing belongs to EV certificates; an OV-class one earns reputation over
-  downloads and time, and Smart App Control in enforced mode will still stop an
-  unknown publisher at first. The clean-machine item below is where that gets
-  measured, not argued.
-  The unsigned installer is already a CI artifact. The remaining CI half is
-  the inner SignPath payload plus gated submit: done in
-  `.github/workflows/windows-release-gate.yml` with
-  `.signpath/artifact-configurations/windows-inner.xml` and
-  `windows-outer.xml`. Submit stays off until the Owner sets SignPath
-  variables and `SIGNPATH_API_TOKEN`. Private vulnerability reporting is
-  enabled on the public repository.
-  - [x] Validate the SignPath Foundation candidate route against enforced Smart
-    App Control with a correctly signed, Mark-of-the-Web third-party release.
-    This validates the route on the test machine, not Sandglass or SmartScreen
-    reputation; Sandglass still needs its own approved signing workflow.
-  - [x] Prepare a fail-closed NSIS external-signing pipeline: export the
-    uninstaller, sign it together with all unsigned bundle PE files, verify every
-    returned PE, import the signed uninstaller, sign the outer installer, then
-    require signed install/uninstall smoke. Inner request ZIP rebuilt
-    2026-09-07 from the smoked `9e148f9` bundle:
-    `build/windows-signing-request/Sandglass-0.1.0-inner-signing-request.zip`
-    (146 PE files). GitHub origin exists. Submit still waits for the Owner
-    to create the SignPath project and set `SIGNPATH_API_TOKEN` plus the
-    organization/project/policy variables. The workflow forbids inventing
-    those.
-- [ ] Authenticode-sign every shipped executable component, installer and uninstaller with SHA-256 and a trusted timestamp.
+  Control, and nothing for a first-time installer, who may still see an unknown
+  publisher warning or policy block. Mutation: remove the Owner signature and
+  the update must be refused for that exact reason; change the installer after
+  the manifest is signed and the digest check must refuse it.
+- [x] Keep the Windows distribution certificate-free and remove the dormant
+  SignPath/Authenticode release branch. **Decided 2026-09-09:** Sandglass follows
+  the lightweight unsigned-community pattern: per-user NSIS installer plus
+  portable ZIP, Owner detached manifest signature, visible update installer and
+  restart. CI needs no signing-service credentials. The earlier SignPath route
+  investigation remains historical evidence in `docs/release-provenance-audit.md`,
+  not a release task or dependency.
 - [x] Sign `SHA256SUMS.windows` with the Owner-held ECDSA P-256 release key;
   verify the embedded public key, manifest signature and installer digest before
-  launch, and reject a missing signature or mismatched payload. Authenticode
-  remains a separate future publisher-trust layer.
-- [ ] Decide whether to register a Microsoft Store developer account and publish an MSIX channel.
-- [ ] Test Smart App Control, SmartScreen, WDAC/App Control for Business and AppLocker on clean machines.
+  launch, and reject a missing signature or mismatched payload.
+- [ ] Test the unsigned package's actual SmartScreen/SAC behavior as a separate
+  compatibility observation. A Windows policy block is not an internal signing
+  gate and must not be made green by weakening either Windows or update integrity.
 - [x] Distinguish an in-process native UI component blocked by Windows policy from a provider account disconnect in the UI, loopback API and `sandglass doctor`; persist only redacted Sandglass-owned diagnostics.
 - [x] Validate the main-executable-blocked path through Windows policy logs; a
   process blocked before startup cannot emit an in-app diagnostic. On
@@ -910,7 +866,6 @@ Relevant Microsoft guidance:
 - [Smart App Control overview](https://learn.microsoft.com/windows/apps/develop/smart-app-control/overview)
 - [Windows app publishing and Store signing](https://learn.microsoft.com/windows/apps/publish/get-started)
 - [App Control for Business troubleshooting](https://learn.microsoft.com/windows/security/application-security/application-control/app-control-for-business/operations/appcontrol-debugging-and-troubleshooting)
-- [Authenticode timestamping](https://learn.microsoft.com/windows/win32/seccrypto/time-stamping-authenticode-signatures)
 
 ## P4 - product polish and release acceptance
 

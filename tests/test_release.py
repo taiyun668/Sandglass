@@ -17,7 +17,6 @@ from sandglass.resources import WEB_DIR
 from zipfile import ZipFile
 
 from tools.build_provenance import generate as generate_build_provenance
-from tools.prepare_signing_request import create_request as create_signing_request
 from tools.release_artifact import inspect_wheel, write_checksums
 from tools.runtime_licenses import (
     PROXY_TOOLS_COMMIT,
@@ -162,14 +161,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("build_windows_release.ps1", text)
         self.assertNotIn("smoke_windows_bundle.ps1", text)
         self.assertIn('python-version: ["3.12", "3.13.15"]', text)
-        self.assertIn("env.SIGNPATH_HAS_TOKEN == 'true'", text)
-        self.assertNotIn("&& secrets.SIGNPATH_API_TOKEN", text)
-        self.assertIn(
-            "signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627",
-            text,
-        )
-        self.assertNotIn("github-action-submit-signing-request@v2", text)
         self.assertIn("dist/SHA256SUMS.windows", text)
+        self.assertNotIn("SIGNPATH", text)
+        self.assertNotIn("signpath/", text)
 
     def test_windows_bundle_smoke_requires_orb_and_loaded_native_panel(self):
         script = (ROOT / "tools" / "smoke_windows_bundle.ps1").read_text(
@@ -205,12 +199,6 @@ class ReleaseMetadataTests(unittest.TestCase):
         update_smoke = (ROOT / "tools" / "smoke_windows_update.ps1").read_text(
             encoding="utf-8"
         )
-        prepare_signing = (ROOT / "tools" / "prepare_windows_signing.ps1").read_text(
-            encoding="utf-8"
-        )
-        build_signed = (ROOT / "tools" / "build_signed_nsis.ps1").read_text(
-            encoding="utf-8"
-        )
         spec = (ROOT / "packaging" / "Sandglass.spec").read_text(encoding="utf-8")
         manifest_path = ROOT / "packaging" / "sandglass.manifest"
         manifest = manifest_path.read_text(encoding="utf-8")
@@ -239,6 +227,8 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("SandglassBuildTools\\nsis-3.12\\makensis.exe", build_script)
         self.assertIn("RequestExecutionLevel user", installer)
         self.assertIn(r'InstallDir "$LOCALAPPDATA\Programs\Sandglass"', installer)
+        for retired_macro in ("EXPORT_UNINST", "IMPORT_UNINST", "SIGNEDUNINST"):
+            self.assertNotIn(retired_macro, installer)
         self.assertIn("${RunningX64}", installer)
         self.assertIn(
             'OpenMutexW(i 0x00100000, i 0, w "Local\\Sandglass.Desktop.SingleInstance")',
@@ -279,14 +269,11 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('"/S"', installer_smoke)
         self.assertIn("--self-test", installer_smoke)
         self.assertIn("Get-TreeSnapshot $providerRoot", installer_smoke)
-        self.assertIn("RequireSigned", installer_smoke)
-        self.assertIn("Get-AuthenticodeSignature", installer_smoke)
-        self.assertIn("EXPORT_UNINST", installer)
-        self.assertIn("IMPORT_UNINST", installer)
-        self.assertIn("SIGNEDUNINST", installer)
-        self.assertIn("tools.prepare_signing_request", prepare_signing)
-        self.assertIn("Get-AuthenticodeSignature", build_signed)
-        self.assertIn("/DIMPORT_UNINST", build_signed)
+        self.assertNotIn("RequireSigned", installer_smoke)
+        self.assertNotIn("Get-AuthenticodeSignature", installer_smoke)
+        self.assertFalse((ROOT / "tools" / "prepare_signing_request.py").exists())
+        self.assertFalse((ROOT / "tools" / "prepare_windows_signing.ps1").exists())
+        self.assertFalse((ROOT / "tools" / "build_signed_nsis.ps1").exists())
         self.assertIn('manifest=str(ROOT / "packaging" / "sandglass.manifest")', spec)
         self.assertIn("Sandglass-build-provenance.json", spec)
         ET.parse(manifest_path)
@@ -762,30 +749,6 @@ class ReleaseMetadataTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(output.read_text()), result)
 
-    def test_inner_signing_request_is_deterministic_and_contains_uninstaller(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundle = root / "Sandglass"
-            (bundle / "_internal").mkdir(parents=True)
-            (bundle / "Sandglass.exe").write_bytes(b"MZapp")
-            (bundle / "_internal" / "runtime.dll").write_bytes(b"MZruntime")
-            (bundle / "readme.txt").write_text("readme", encoding="utf-8")
-            uninstaller = root / "Uninstall.exe"
-            uninstaller.write_bytes(b"MZuninstaller")
-            first = root / "first.zip"
-            second = root / "second.zip"
-
-            one = create_signing_request(bundle, uninstaller, first)
-            two = create_signing_request(bundle, uninstaller, second)
-
-            self.assertEqual(first.read_bytes(), second.read_bytes())
-            self.assertEqual(one["pe_count"], 3)
-            self.assertEqual(one["pe_files"], two["pe_files"])
-            with ZipFile(first) as archive:
-                self.assertIsNone(archive.testzip())
-                self.assertEqual(archive.read("Uninstall.exe"), b"MZuninstaller")
-                self.assertEqual(archive.read("Sandglass/Sandglass.exe"), b"MZapp")
-
     def test_release_artifact_gate_rejects_private_and_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -903,8 +866,8 @@ class SigningClaimsAgreeTests(unittest.TestCase):
 
     def test_no_sponsor_is_named_while_there_is_no_account(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        workflow = (ROOT / "docs" / "signing-workflow.md").read_text(encoding="utf-8")
-        no_account = "no SignPath account" in workflow
+        integrity = (ROOT / "docs" / "release-integrity.md").read_text(encoding="utf-8")
+        no_account = "No certificate, signing-service account" in integrity
 
         named = [
             sponsor for sponsor in ("SignPath", "Certum", "DigiCert", "Sectigo",
@@ -917,7 +880,7 @@ class SigningClaimsAgreeTests(unittest.TestCase):
                 "签名工作流说没有账号,README 却已经把赞助方的名字挂出去了",
             )
             self.assertIn(
-                "not Authenticode-signed yet", readme,
+                "not Authenticode-signed.", readme,
                 "没有证书时,README 必须自己说清楚,而不是留给用户去猜",
             )
         else:

@@ -20,18 +20,6 @@ SetCompressor /SOLID lzma
 !ifndef ARTIFACTNAME
   !define ARTIFACTNAME "Sandglass-${APPVERSION}-windows-x64-unsigned-setup"
 !endif
-!ifdef EXPORT_UNINST
-  !ifndef UNINSTOUT
-    !error "EXPORT_UNINST requires UNINSTOUT"
-  !endif
-  !uninstfinalize 'cmd /C copy /Y "%1" "${UNINSTOUT}" >nul'
-!endif
-!ifdef IMPORT_UNINST
-  !ifndef SIGNEDUNINST
-    !error "IMPORT_UNINST requires SIGNEDUNINST"
-  !endif
-!endif
-
 Var UpdateMode
 Var UpdateParentPid
 Var UpdateBackup
@@ -106,10 +94,8 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Sandglass.exe"
 !define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_FINISH
-!ifndef IMPORT_UNINST
-  !insertmacro MUI_UNPAGE_CONFIRM
-  !insertmacro MUI_UNPAGE_INSTFILES
-!endif
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
@@ -958,13 +944,8 @@ Section "Sandglass" SecMain
   ${If} $UpdateMode == 1
     StrCpy $UpdateShortcutChanged 1
   ${EndIf}
-!ifdef IMPORT_UNINST
-  ClearErrors
-  File /oname=Uninstall.exe "${SIGNEDUNINST}"
-!else
   ClearErrors
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-!endif
   ${If} ${Errors}
     StrCpy $UpdatePhase "write-uninstaller"
     ${If} $UpdateMode == 1
@@ -1141,7 +1122,6 @@ Section "Sandglass" SecMain
   ${EndIf}
 SectionEnd
 
-!ifndef IMPORT_UNINST
 Function un.CheckSandglassMutex
   ; ? e makes the System plugin capture GetLastError the instant the call
   ; returns. A separate System::Call to GetLastError does not work: the plugin
@@ -1227,4 +1207,3 @@ Section "Uninstall"
   Delete "$INSTDIR\.sandglass-owner"
   RMDir "$INSTDIR"
 SectionEnd
-!endif

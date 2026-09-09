@@ -3,9 +3,9 @@
 Two things this deliberately will not do. It never downloads during a check, so
 opening the panel costs one small request and nothing else. And it never runs an
 installer it cannot vouch for: the release has to publish a checksum file beside
-the installer, the download has to match it, and the file has to carry either a
-trusted Windows signature or the project's signed release manifest. The latter
-is the release identity used by the public unsigned installer route.
+the installer, the download has to match it, and that manifest has to carry the
+Owner's detached signature. The signed manifest is the release identity used by
+the public unsigned installer route.
 
 Nothing here can offer anything until a release exists to find. That is the
 correct dark state, not a failure.
@@ -14,7 +14,6 @@ correct dark state, not a failure.
 from __future__ import annotations
 
 import atexit
-import ctypes
 import errno
 import hashlib
 import json
@@ -27,7 +26,6 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
-from ctypes import wintypes
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,7 +47,7 @@ MAX_INSTALLER_BYTES = 200 << 20
 # ``endswith('-setup.exe')`` check would silently accept unrelated assets.
 INSTALLER_NAME_RE = re.compile(
     r"^Sandglass-(?P<version>[^/\\]+)-windows-x64-"
-    r"(?P<variant>(?:(?:unsigned|signed)-)?(?:outer-)?)setup\.exe$",
+    r"unsigned-setup\.exe$",
     re.IGNORECASE,
 )
 CHECKSUMS_NAME = "SHA256SUMS.windows"
@@ -244,20 +242,6 @@ def _installer_name(name: str, version: str) -> bool:
     return bool(match and match.group("version") == version)
 
 
-def _installer_priority(name: str) -> int:
-    """Prefer the outer/signature-bearing artifact when a release has both."""
-    match = INSTALLER_NAME_RE.fullmatch(str(name or ""))
-    variant = match.group("variant").lower() if match else ""
-    return {
-        "signed-outer-": 0,
-        "unsigned-outer-": 1,  # SignPath's signed outer keeps this build name.
-        "outer-": 2,
-        "signed-": 3,
-        "": 4,
-        "unsigned-": 5,
-    }.get(variant, 99)
-
-
 def _manifest_version(raw_sums: bytes) -> str:
     """Read the signed manifest's mandatory version metadata line."""
     try:
@@ -277,11 +261,10 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
     for asset in release.get("assets") or []:
         if isinstance(asset, dict):
             assets[str(asset.get("name") or "")] = str(asset.get("browser_download_url") or "")
-    # Prefer a signed outer artifact when present; the ordinary unsigned build
-    # remains the deliberate no-certificate release path. All candidates must
-    # carry this release's exact version.
+    # The public channel has exactly one Windows installer shape. A second
+    # matching installer is ambiguous rather than a priority decision.
     candidates = [name for name in assets if _installer_name(name, version)]
-    installer = min(candidates, key=_installer_priority) if candidates else ""
+    installer = candidates[0] if len(candidates) == 1 else ""
     if not installer or CHECKSUMS_NAME not in assets:
         # Without a published checksum there is nothing to verify against, so
         # there is nothing to offer. An update that cannot be checked is not an
@@ -297,10 +280,10 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
         return {}
     if not digest:
         return {}
-    if RELEASE_PUBLIC_KEY and not manifest_signed:
-        # A key is published, so every release is expected to carry a manifest
-        # signed with it. One that does not is either older than the key or not
-        # ours; either way it is not something to offer.
+    if not manifest_signed:
+        # Automatic updates always require the Owner's detached release
+        # signature. A checksum without its authorizing signature is only an
+        # untrusted list of hashes, not a Sandglass update.
         return {}
     return {
         "version": version,
@@ -455,51 +438,6 @@ def available_update(force: bool = False) -> dict[str, Any]:
     return offer
 
 
-def authenticode_valid(path: Path) -> bool:
-    """Whether Windows itself trusts this file's signature."""
-    if os.name != "nt":
-        return False
-
-    class GUID(ctypes.Structure):
-        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
-                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_byte * 8)]
-
-    class FileInfo(ctypes.Structure):
-        _fields_ = [("cbStruct", wintypes.DWORD), ("pcwszFilePath", wintypes.LPCWSTR),
-                    ("hFile", wintypes.HANDLE), ("pgKnownSubject", ctypes.c_void_p)]
-
-    class TrustData(ctypes.Structure):
-        _fields_ = [("cbStruct", wintypes.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
-                    ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wintypes.DWORD),
-                    ("fdwRevocationChecks", wintypes.DWORD), ("dwUnionChoice", wintypes.DWORD),
-                    ("pFile", ctypes.POINTER(FileInfo)), ("dwStateAction", wintypes.DWORD),
-                    ("hWVTStateData", wintypes.HANDLE), ("pwszURLReference", wintypes.LPCWSTR),
-                    ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
-                    ("pSignatureSettings", ctypes.c_void_p)]
-
-    # WINTRUST_ACTION_GENERIC_VERIFY_V2
-    action = GUID(0x00AAC56B, 0xCD44, 0x11D0,
-                  (ctypes.c_byte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
-    info = FileInfo(ctypes.sizeof(FileInfo), str(path), None, None)
-    data = TrustData()
-    data.cbStruct = ctypes.sizeof(TrustData)
-    data.dwUIChoice = 2            # WTD_UI_NONE
-    data.fdwRevocationChecks = 0   # WTD_REVOKE_NONE
-    data.dwUnionChoice = 1         # WTD_CHOICE_FILE
-    data.pFile = ctypes.pointer(info)
-    data.dwStateAction = 1         # WTD_STATEACTION_VERIFY
-    try:
-        trust = ctypes.WinDLL("wintrust.dll")
-    except OSError:
-        return False
-    trust.WinVerifyTrust.restype = wintypes.LONG
-    trust.WinVerifyTrust.argtypes = [wintypes.HWND, ctypes.POINTER(GUID), ctypes.c_void_p]
-    result = trust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data))
-    data.dwStateAction = 2         # WTD_STATEACTION_CLOSE
-    trust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(data))
-    return result == 0
-
-
 def download_verified(offer: dict[str, Any], into: Path) -> Path:
     """Fetch the installer, and refuse it unless it is exactly what was promised."""
     url = _https(str(offer.get("url") or ""))
@@ -524,18 +462,15 @@ def download_verified(offer: dict[str, Any], into: Path) -> Path:
     if digest.hexdigest() != expected:
         into.unlink(missing_ok=True)
         raise ValueError("installer does not match the published checksum")
-    # Two independent proofs that these bytes are ours, and either is enough.
-    # Authenticode says Windows trusts the publisher; the manifest signature
-    # says the key that signed every previous release signed this digest too.
-    # Requiring only the first meant no release could be offered at all until a
-    # certificate existed, which made the update path hostage to a question it
-    # does not need answered. Requiring neither would leave the channel open to
-    # anyone who can serve a download.
-    if not (offer.get("manifest_signed") or authenticode_valid(into)):
+    # The detached signature over SHA256SUMS.windows is the only release
+    # identity proof accepted here. `offer_from` verifies that signature and
+    # binds it to this version and installer before setting this flag. Windows
+    # Publisher trust is intentionally not a second path: unsigned preview
+    # packages must remain installable without a certificate.
+    if offer.get("manifest_signed") is not True:
         into.unlink(missing_ok=True)
         raise ValueError(
-            "installer carries neither a trusted Authenticode signature nor a "
-            "release manifest signed with this project's key"
+            "installer lacks a release manifest signed with this project's key"
         )
     return into
 

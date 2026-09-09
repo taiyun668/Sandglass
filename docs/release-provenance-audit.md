@@ -1,5 +1,9 @@
 # Sandglass release provenance audit
 
+> Historical snapshot from 2026-08-31. The current release gate is maintained
+> in `docs/release-checklist.md`; the former third-party Authenticode route was
+> removed on 2026-09-09 and is not a Sandglass dependency.
+
 Status: `PUBLIC_RELEASE_BLOCKED`  
 Audited: 2026-08-31
 Evidence base: official-only boundary plus local Windows candidate evidence

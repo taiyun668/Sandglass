@@ -2,9 +2,9 @@
 
 The button is dark until a release offers something, and the offer is only
 installable if it can be checked: a checksum published beside the installer, a
-download that matches it, and either a trusted Windows signature or the
-project's signed release manifest. The public unsigned installer route uses
-the latter as its release identity.
+download that matches it, and the Owner's detached signature over that
+manifest. The public unsigned installer route uses the signed manifest as its
+release identity.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class VersionComparisonTests(unittest.TestCase):
 
 
 class OfferTests(unittest.TestCase):
-    ASSET = "Sandglass-9.9.9-windows-x64-setup.exe"
+    ASSET = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
 
     def _release(self, *, checksums=True, tag="v9.9.9"):
         assets = [{"name": self.ASSET,
@@ -62,18 +62,11 @@ class OfferTests(unittest.TestCase):
         self.assertEqual(update.offer_from(self._release(tag="v0.0.1")), {})
 
     def test_a_complete_release_is_offered_with_its_checksum(self):
-        """States which world it is testing rather than inheriting the shipped key.
-
-        This passed for as long as RELEASE_PUBLIC_KEY happened to be empty and
-        broke the moment a real one was generated -- a test whose result came
-        from the developer's machine rather than from what it asserts. The
-        signed-manifest requirement has its own test; this one is about a
-        release that carries a checksum, in a build that declares no key.
-        """
+        """A release carrying the required signed manifest is offered."""
         digest = "a" * 64
-        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+        with patch.object(
             update, "_get", return_value=(digest + "  " + self.ASSET).encode()
-        ):
+        ), patch.object(update, "_manifest_signature_ok", return_value=True):
             offer = update.offer_from(self._release())
         self.assertEqual(offer["version"], "9.9.9")
         self.assertEqual(offer["sha256"], digest)
@@ -83,9 +76,9 @@ class OfferTests(unittest.TestCase):
         release = self._release()
         release["body"] = "修复输入框\n\n- 保留本地数据"
         digest = "a" * 64
-        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+        with patch.object(
             update, "_get", return_value=(digest + "  " + self.ASSET).encode()
-        ):
+        ), patch.object(update, "_manifest_signature_ok", return_value=True):
             offer = update.offer_from(release)
         self.assertEqual(offer["notes"], release["body"])
         self.assertIsInstance(offer["notes"], str)
@@ -113,8 +106,8 @@ class OfferTests(unittest.TestCase):
              "browser_download_url": "https://github.com/a/b/sums"},
         ]
         sums = b"a" * 64 + b"  Sandglass-9.9.9-windows-x64-unsigned-setup.exe\n"
-        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
-            update, "_get", return_value=sums
+        with patch.object(update, "_get", return_value=sums), patch.object(
+            update, "_manifest_signature_ok", return_value=True
         ):
             offer = update.offer_from(release)
         self.assertEqual(offer["asset"],
@@ -126,10 +119,14 @@ class OfferTests(unittest.TestCase):
         with patch.object(update, "_get", return_value=b"a" * 64):
             self.assertEqual(update.offer_from(release), {})
 
-    def test_signed_outer_installer_wins_when_unsigned_build_is_also_published(self):
+    def test_retired_signing_variant_is_not_selected(self):
         release = self._release()
         unsigned = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
         outer = "Sandglass-9.9.9-windows-x64-unsigned-outer-setup.exe"
+        self.assertFalse(
+            update._installer_name(outer, "9.9.9"),
+            "retired signing-pipeline variants must not re-enter the update channel",
+        )
         release["assets"] = [
             {"name": unsigned, "browser_download_url": "https://github.com/a/b/u.exe"},
             {"name": outer, "browser_download_url": "https://github.com/a/b/o.exe"},
@@ -138,11 +135,11 @@ class OfferTests(unittest.TestCase):
         ]
         sums = (b"a" * 64 + b"  " + unsigned.encode() + b"\n" +
                 b"b" * 64 + b"  " + outer.encode() + b"\n")
-        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
-            update, "_get", return_value=sums
+        with patch.object(update, "_get", return_value=sums), patch.object(
+            update, "_manifest_signature_ok", return_value=True
         ):
             offer = update.offer_from(release)
-        self.assertEqual(offer["asset"], outer)
+        self.assertEqual(offer["asset"], unsigned)
 
 
 class HostTests(unittest.TestCase):
@@ -191,7 +188,7 @@ class DownloadVerificationTests(unittest.TestCase):
                 update.download_verified(self._offer(payload, "c" * 64), target)
         self.assertFalse(target.exists(), "校验失败的文件不能留在磁盘上")
 
-    def test_a_matching_but_unsigned_download_is_refused(self):
+    def test_a_matching_download_without_a_signed_manifest_is_refused(self):
         """The checksum only proves it is the file they published.
 
         It says nothing about who published it, which is the question that
@@ -199,8 +196,12 @@ class DownloadVerificationTests(unittest.TestCase):
         """
         payload = b"MZ" + b"\x00" * 32
         target = self.root / "setup.exe"
+        # A Windows-trusted publisher is deliberately not an alternate update
+        # identity. `create=True` makes this a mutation shield: restoring the
+        # retired authenticode_valid() OR branch would consume the fake True
+        # and wrongly accept this unsigned manifest.
         with patch("urllib.request.urlopen", self._serve(payload)), patch.object(
-            update, "authenticode_valid", return_value=False
+            update, "authenticode_valid", return_value=True, create=True
         ):
             with self.assertRaises(ValueError) as caught:
                 update.download_verified(self._offer(payload), target)
@@ -211,10 +212,10 @@ class DownloadVerificationTests(unittest.TestCase):
         """The counterpart: refusing everything would pass the tests above."""
         payload = b"MZ" + b"\x00" * 32
         target = self.root / "setup.exe"
-        with patch("urllib.request.urlopen", self._serve(payload)), patch.object(
-            update, "authenticode_valid", return_value=True
-        ):
-            kept = update.download_verified(self._offer(payload), target)
+        offer = self._offer(payload)
+        offer["manifest_signed"] = True
+        with patch("urllib.request.urlopen", self._serve(payload)):
+            kept = update.download_verified(offer, target)
         self.assertTrue(kept.exists())
         self.assertEqual(kept.read_bytes(), payload)
 
@@ -225,27 +226,6 @@ class DownloadVerificationTests(unittest.TestCase):
                 update.download_verified({"url": "https://github.com/a/b", "sha256": "nope"},
                                          self.root / "setup.exe")
         self.assertEqual(called, [])
-
-
-class SignatureTests(unittest.TestCase):
-    @unittest.skipUnless(os.name == "nt", "Authenticode is a Windows check")
-    def test_an_unsigned_file_is_not_trusted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "unsigned.exe"
-            path.write_bytes(b"MZ" + b"\x00" * 4096)
-            self.assertFalse(update.authenticode_valid(path))
-
-    @unittest.skipUnless(os.name == "nt", "Authenticode is a Windows check")
-    def test_a_signed_file_is_trusted(self):
-        """Without this the check above passes by rejecting everything.
-
-        python.exe carries an embedded signature. Files signed only through the
-        Windows catalog do not, and are correctly rejected by a file-level
-        check, so they cannot stand in here.
-        """
-        import sys
-
-        self.assertTrue(update.authenticode_valid(Path(sys.executable)))
 
 
 class CheckStateTests(unittest.TestCase):
@@ -683,34 +663,27 @@ class ManifestSignedUpdateTests(unittest.TestCase):
         target = self.root / "setup.exe"
         offer = {"url": "https://github.com/a/b/setup.exe", "asset": "setup.exe",
                  "sha256": hashlib.sha256(payload).hexdigest(), "manifest_signed": True}
-        with patch("urllib.request.urlopen", self._serve(payload)), patch.object(
-            update, "authenticode_valid", return_value=False
-        ):
+        with patch("urllib.request.urlopen", self._serve(payload)):
             kept = update.download_verified(offer, target)
 
         self.assertTrue(kept.exists())
         self.assertEqual(kept.read_bytes(), payload)
 
-    def test_a_release_without_a_signed_manifest_is_not_offered_once_a_key_exists(self):
-        """A published key means every later release carries a signed manifest.
-
-        One that does not is either older than the key or not ours.
-        """
+    def test_a_release_without_a_signed_manifest_is_never_offered(self):
+        """A checksum alone does not identify who authorized the release."""
         release = {
             "tag_name": "v9.9.9",
             "assets": [
-                {"name": "Sandglass-9.9.9-windows-x64-setup.exe",
+                {"name": "Sandglass-9.9.9-windows-x64-unsigned-setup.exe",
                  "browser_download_url": "https://github.com/a/b/setup.exe"},
                 {"name": "SHA256SUMS.windows",
                  "browser_download_url": "https://github.com/a/b/SHA256SUMS.windows"},
             ],
         }
-        sums = (b"a" * 64) + b" *Sandglass-9.9.9-windows-x64-setup.exe" + bytes((10,))
+        sums = ((b"a" * 64) +
+                b" *Sandglass-9.9.9-windows-x64-unsigned-setup.exe" + bytes((10,)))
         with patch.object(update, "_get", return_value=sums):
-            with patch.object(update, "RELEASE_PUBLIC_KEY", ""):
-                self.assertTrue(update.offer_from(release), "没有密钥时行为不该改变")
-            with patch.object(update, "RELEASE_PUBLIC_KEY", _TEST_PUBLIC_KEY):
-                self.assertEqual(update.offer_from(release), {})
+            self.assertEqual(update.offer_from(release), {})
 
     def test_signed_manifest_must_bind_version_and_installer_name(self):
         installer = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
