@@ -1228,10 +1228,14 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('${GetOptions} "$R9" "/UPDATE_TOKEN=" $UpdateReadySignal', installer)
         self.assertIn('Function WaitForUpdateReady', installer)
         self.assertIn(
-            "WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1 ? e",
+            "WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .R1 ? e",
             installer,
         )
-        self.assertIn("ready-wait-$R1-e$R2-event$3-e$R4-child$5-e$R6", installer)
+        self.assertNotIn(
+            "WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1",
+            installer,
+        )
+        self.assertIn("ready-wait-$R1-e$R2", installer)
         launch = section.index('Call LaunchUpdateDesktop')
         wait = section.index('Call WaitForUpdateReady', launch)
         delete_backup = section.index('RMDir /r "$UpdateBackup"')
