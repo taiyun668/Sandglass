@@ -764,7 +764,9 @@ class ManifestSignedUpdateTests(unittest.TestCase):
                 manifest.write_text(
                     f"# Sandglass-Version: 9.9.9\n{digest}  {payload.name}\n",
                     encoding="ascii",
+                    newline="\n",
                 )
+                self.assertNotIn(b"\r\n", manifest.read_bytes())
                 checked = subprocess.run(
                     [sha256sum, "--strict", "-c", str(manifest)],
                     cwd=root, capture_output=True, text=True,
