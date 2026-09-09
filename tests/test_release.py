@@ -879,9 +879,14 @@ Write-Output ('PUBLIC=' + ([System.BitConverter]::ToString($q.X) + [System.BitCo
                     self.assertIn(phrase, text)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
         for filename in required:
             self.assertIn(f"]({filename})", readme)
-        self.assertIn("不代表与对应厂商存在隶属或背书关系", readme)
+            self.assertIn(f"]({filename})", readme_zh)
+        self.assertIn("do not imply affiliation or endorsement", readme)
+        self.assertIn("不代表与对应厂商存在隶属或背书关系", readme_zh)
+        self.assertIn("](README.zh-CN.md)", readme)
+        self.assertIn("](README.md)", readme_zh)
         self.assertIn("not stable public integration contracts", (ROOT / "SUPPORT.md").read_text(encoding="utf-8"))
 
 
