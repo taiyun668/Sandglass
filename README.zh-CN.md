@@ -8,6 +8,11 @@
 
 **[最新 GitHub Release](https://github.com/taiyun668/Sandglass/releases/latest)**
 
+<p align="center">
+  <img src="docs/assets/sandglass-overview.png" alt="使用隐私安全合成演示数据的 Sandglass 总览" width="360">
+</p>
+<p align="center"><sub>隐私安全的合成演示数据；不包含任何真实账号或用量信息。</sub></p>
+
 > **观测从 Sandglass 介入后开始形成完整证据链。** 安装前的历史只有在官方本机
 > 信源能够直接证明时才会归属到账号；证明不了的部分会如实保持未归属，不会按
 > 当前登录账号倒推过去。

@@ -11,6 +11,11 @@ accounts, refresh credentials, or modify provider directories.
 
 **[Latest GitHub Release](https://github.com/taiyun668/Sandglass/releases/latest)**
 
+<p align="center">
+  <img src="docs/assets/sandglass-overview.png" alt="Sandglass overview with privacy-safe synthetic demo data" width="360">
+</p>
+<p align="center"><sub>Privacy-safe synthetic demo data. No real account or usage information is shown.</sub></p>
+
 > **A complete evidence chain starts only after Sandglass begins observing.**
 > History from before install is attributed to an account only when an official
 > local source can prove it directly. Anything that cannot be proved stays
