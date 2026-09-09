@@ -219,6 +219,39 @@ try {
         throw "Installing over a running copy ended with no Sandglass running."
     }
 
+    $uninstaller = Join-Path $installDir "unins000.exe"
+    if (-not (Test-Path -LiteralPath $uninstaller)) {
+        $uninstaller = Join-Path $installDir "Uninstall.exe"
+    }
+    if (-not (Test-Path -LiteralPath $uninstaller)) {
+        throw "Uninstaller is missing."
+    }
+
+    # The desktop mutex, not a program-file rename, is the running-copy
+    # authority. Rename of a loaded PyInstaller image succeeds, so this must
+    # refuse with a distinct code and leave every installed path in place.
+    $uninstallRunning = Start-Process -FilePath $uninstaller -ArgumentList @(
+        "/S", "_?=$installDir"
+    ) -PassThru -WindowStyle Hidden
+    $uninstallRunning.WaitForExit()
+    $uninstallRunning.Refresh()
+    if ($uninstallRunning.ExitCode -ne 9) {
+        throw "Uninstalling while the desktop is running returned $($uninstallRunning.ExitCode), expected 9."
+    }
+    if (-not (Test-Path -LiteralPath $installedExe)) {
+        throw "Uninstall removed the program while the desktop mutex was held."
+    }
+    if (-not (Test-Path -LiteralPath $uninstaller)) {
+        throw "Uninstall removed Uninstall.exe while the desktop mutex was held."
+    }
+    if ((Get-InstalledSandglassProcesses).Count -eq 0) {
+        throw "Uninstalling while the desktop is running ended with no Sandglass running."
+    }
+    $uninstallReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"
+    if (-not (Test-Path -LiteralPath $uninstallReg)) {
+        throw "Uninstall removed its registration while the desktop mutex was held."
+    }
+
     Stop-InstalledSandglass
 
     $selfTest = Start-Process -FilePath $installedExe -ArgumentList "--self-test" `
@@ -227,13 +260,6 @@ try {
         throw "Installed executable self-test returned $($selfTest.ExitCode)."
     }
 
-    $uninstaller = Join-Path $installDir "unins000.exe"
-    if (-not (Test-Path -LiteralPath $uninstaller)) {
-        $uninstaller = Join-Path $installDir "Uninstall.exe"
-    }
-    if (-not (Test-Path -LiteralPath $uninstaller)) {
-        throw "Uninstaller is missing."
-    }
     $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
         "/S", "_?=$installDir"
     ) -Wait -PassThru -WindowStyle Hidden
@@ -249,7 +275,8 @@ try {
         throw "The installed executable remained after uninstall."
     }
     Write-Output ("PASS per-user install, post-install launch, running-copy " +
-        "abort, packaged self-test, uninstall, provider byte invariance")
+        "abort, running-uninstall abort, packaged self-test, uninstall, " +
+        "provider byte invariance")
 }
 finally {
     foreach ($name in $oldEnvironment.Keys) {

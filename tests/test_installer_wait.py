@@ -1,6 +1,7 @@
 """Regression coverage for the installer smoke process boundary."""
 
 import ctypes
+import hashlib
 import os
 import shutil
 import subprocess
@@ -10,6 +11,9 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+
+if os.name == "nt":
+    import winreg
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -456,6 +460,473 @@ class InstallerWaitTests(unittest.TestCase):
                                 process.wait(timeout=2)
                             if child_pid is not None:
                                 _terminate(child_pid)
+
+
+def _makensis() -> Path | None:
+    extra = []
+    env_compiler = os.environ.get("NSIS_COMPILER") or os.environ.get("NsisCompiler")
+    if env_compiler:
+        extra.append(Path(env_compiler))
+    local = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+    candidates = extra + [
+        Path(local) / "SandglassBuildTools" / "nsis-3.12" / "makensis.exe",
+        Path(local) / "Programs" / "NSIS" / "makensis.exe",
+        Path(program_files) / "NSIS" / "makensis.exe",
+        Path(program_files_x86) / "NSIS" / "makensis.exe",
+    ]
+    which = shutil.which("makensis")
+    if which:
+        candidates.append(Path(which))
+    for path in candidates:
+        if path and path.is_file():
+            return path
+    return None
+
+
+def _nsi_path(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "/")
+
+
+def _nsi_function(source: str, name: str) -> str:
+    start = source.index(f"Function {name}")
+    end = source.index("FunctionEnd", start) + len("FunctionEnd")
+    return source[start:end]
+
+
+def _nsi_uninstall_section(source: str) -> str:
+    start = source.index('Section "Uninstall"')
+    end = source.index("SectionEnd", start) + len("SectionEnd")
+    return source[start:end]
+
+
+def _restore_rename_desktop_gate(section: str) -> str:
+    start = section.index("Call un.CheckSandglassDesktopMutex")
+    end = section.index('${If} ${FileExists} "$INSTDIR\\Sandglass.exe"')
+    return (
+        section[:start]
+        + '    ClearErrors\n'
+        + '    Rename "$INSTDIR\\Sandglass.exe" "$INSTDIR\\Sandglass.exe.removing"\n'
+        + '    ${If} ${Errors}\n'
+        + '      SetErrorLevel 9\n'
+        + '      Abort\n'
+        + '    ${EndIf}\n'
+        + '    Rename "$INSTDIR\\Sandglass.exe.removing" "$INSTDIR\\Sandglass.exe"\n\n  '
+        + section[end:]
+    )
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, str]]:
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            data = path.read_bytes()
+            snapshot[path.relative_to(root).as_posix()] = (
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+            )
+    return snapshot
+
+
+def _reg_value(path: str, name: str):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return value
+    except OSError:
+        return None
+
+
+def _delete_reg_key(path: str) -> None:
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+    except OSError:
+        pass
+
+
+def _delete_run_value(name: str) -> None:
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.DeleteValue(key, name)
+    except OSError:
+        pass
+
+
+class _HeldMutex:
+    def __init__(self, name: str):
+        self.name = name
+        self.handle = None
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p
+        ]
+        self._kernel32.CreateMutexW.restype = ctypes.c_void_p
+        self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        self._kernel32.CloseHandle.restype = ctypes.c_int
+
+    def __enter__(self):
+        ctypes.set_last_error(0)
+        handle = self._kernel32.CreateMutexW(None, True, self.name)
+        error = ctypes.get_last_error()
+        if not handle:
+            raise OSError(error, f"CreateMutexW failed for {self.name}")
+        if error == 183:
+            self._kernel32.CloseHandle(handle)
+            raise RuntimeError(f"mutex already held: {self.name}")
+        self.handle = handle
+        return self
+
+    def __exit__(self, *exc):
+        if self.handle:
+            self._kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
+class _UninstallProbe:
+    def __init__(
+        self,
+        install_dir: Path,
+        uninstaller: Path,
+        shortcut: Path,
+        desktop_mutex: str,
+        product_key: str,
+        uninstall_key: str,
+        run_value: str,
+        files_before: dict[str, tuple[int, str]],
+        shortcut_before: bytes,
+        reg_before: dict[str, object],
+    ):
+        self.install_dir = install_dir
+        self.uninstaller = uninstaller
+        self.shortcut = shortcut
+        self.desktop_mutex = desktop_mutex
+        self.product_key = product_key
+        self.uninstall_key = uninstall_key
+        self.run_value = run_value
+        self.files_before = files_before
+        self.shortcut_before = shortcut_before
+        self.reg_before = reg_before
+
+    def registration(self) -> dict[str, object]:
+        return {
+            "install_dir": _reg_value(self.product_key, "InstallDir"),
+            "display_name": _reg_value(self.uninstall_key, "DisplayName"),
+            "uninstall_string": _reg_value(self.uninstall_key, "UninstallString"),
+            "run": _reg_value(
+                r"Software\Microsoft\Windows\CurrentVersion\Run", self.run_value
+            ),
+        }
+
+    def cleanup_registry(self) -> None:
+        _delete_run_value(self.run_value)
+        _delete_reg_key(self.uninstall_key)
+        _delete_reg_key(self.product_key)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows NSIS uninstaller probes are required")
+class UninstallDesktopMutexTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.makensis = _makensis()
+        if cls.makensis is None:
+            raise unittest.SkipTest(
+                "NSIS 3.12 is required to compile the uninstall mutex probe"
+            )
+
+    def _compile_nsi(self, source: Path) -> None:
+        done = subprocess.run(
+            [str(self.makensis), "/V2", "/WX", str(source)],
+            cwd=source.parent,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if done.returncode != 0:
+            self.fail(
+                f"makensis failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+            )
+
+    def _compile_stop_stub(self, dest: Path) -> None:
+        script = dest.with_suffix(".nsi")
+        script.write_text(
+            "Unicode True\n"
+            "RequestExecutionLevel user\n"
+            "SilentInstall silent\n"
+            'Name "SandglassStopStub"\n'
+            f'OutFile "{_nsi_path(dest)}"\n'
+            "Function .onInit\n"
+            "  SetSilent silent\n"
+            "FunctionEnd\n"
+            "Section\n"
+            "SectionEnd\n",
+            encoding="utf-8-sig",
+        )
+        self._compile_nsi(script)
+
+    def _prepare_probe(self, root: Path, restore_rename: bool) -> _UninstallProbe:
+        token = uuid.uuid4().hex
+        install_dir = root / "installed"
+        shortcut_dir = root / "start-menu"
+        setup_exe = root / "probe-setup.exe"
+        stub_exe = root / "Sandglass.exe"
+        nsi_path = root / "probe.nsi"
+        install_dir.mkdir(parents=True)
+        shortcut_dir.mkdir()
+        self._compile_stop_stub(stub_exe)
+
+        source = (ROOT / "packaging" / "sandglass.nsi").read_text(encoding="utf-8")
+        observer_fn = _nsi_function(source, "un.CheckSandglassMutex")
+        desktop_fn = _nsi_function(source, "un.CheckSandglassDesktopMutex")
+        uninstall = _nsi_uninstall_section(source)
+        if restore_rename:
+            uninstall = _restore_rename_desktop_gate(uninstall)
+            self.assertNotIn("Call un.CheckSandglassDesktopMutex", uninstall)
+            self.assertIn("Sandglass.exe.removing", uninstall)
+
+        desktop_mutex = f"Local\\Sandglass.UninstallProbe.Desktop.{token}"
+        observer_mutex = f"Local\\Sandglass.UninstallProbe.Observer.{token}"
+        product_key = f"Software\\SandglassUninstallProbe_{token}"
+        uninstall_key = (
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\"
+            f"SandglassUninstallProbe_{token}"
+        )
+        run_value = f"sandglass-uninstall-probe-{token}"
+        observer_fn = observer_fn.replace(
+            r"Local\Sandglass.Observer.SingleInstance", observer_mutex
+        )
+        desktop_fn = desktop_fn.replace(
+            r"Local\Sandglass.Desktop.SingleInstance", desktop_mutex
+        )
+        uninstall = (
+            uninstall.replace(
+                r'HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"',
+                f'HKCU "{uninstall_key}"',
+            )
+            .replace(
+                r'HKCU "Software\Sandglass"',
+                f'HKCU "{product_key}"',
+            )
+            .replace(
+                r'HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass"',
+                f'HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "{run_value}"',
+            )
+            .replace(
+                r'Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"',
+                f'Delete "{(shortcut_dir / "Sandglass.lnk").resolve()}"',
+            )
+            .replace(
+                r'RMDir "$SMPROGRAMS\Sandglass"',
+                f'RMDir "{shortcut_dir.resolve()}"',
+            )
+        )
+
+        nsi_path.write_text(
+            "Unicode True\n"
+            "RequestExecutionLevel user\n"
+            '!include "LogicLib.nsh"\n'
+            'Name "SandglassUninstallProbe"\n'
+            f'OutFile "{_nsi_path(setup_exe)}"\n'
+            f'InstallDir "{_nsi_path(install_dir)}"\n'
+            "SilentInstall silent\n"
+            "Section\n"
+            '  SetOutPath "$INSTDIR"\n'
+            r'  WriteUninstaller "$INSTDIR\Uninstall.exe"'
+            "\nSectionEnd\n\n"
+            f"{observer_fn}\n\n"
+            f"{'' if restore_rename else desktop_fn + chr(10) + chr(10)}"
+            f"{uninstall}\n",
+            encoding="utf-8-sig",
+        )
+        self._compile_nsi(nsi_path)
+        setup = subprocess.run(
+            [str(setup_exe), "/S", f"/D={install_dir}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(setup.returncode, 0, setup.stderr or setup.stdout)
+        uninstaller = install_dir / "Uninstall.exe"
+        self.assertTrue(uninstaller.is_file(), "probe uninstaller was not written")
+
+        shutil.copy2(stub_exe, install_dir / "Sandglass.exe")
+        (install_dir / "LICENSE").write_text("license", encoding="utf-8")
+        (install_dir / "PRIVACY.md").write_text("privacy", encoding="utf-8")
+        (install_dir / "SUPPORT.md").write_text("support", encoding="utf-8")
+        (install_dir / "THIRD_PARTY_NOTICES.md").write_text("notices", encoding="utf-8")
+        (install_dir / "Sandglass-owned-paths.json").write_text("{}", encoding="utf-8")
+        (install_dir / ".sandglass-owner").write_text("owner", encoding="utf-8")
+        (install_dir / "_internal").mkdir()
+        (install_dir / "_internal" / "payload.bin").write_bytes(b"internal")
+        (install_dir / "THIRD_PARTY_LICENSES").mkdir()
+        (install_dir / "THIRD_PARTY_LICENSES" / "notice.txt").write_text(
+            "third", encoding="utf-8"
+        )
+        (install_dir / "owner-custom").mkdir()
+        (install_dir / "owner-custom" / "keep.txt").write_text("keep", encoding="utf-8")
+        (shortcut_dir / "Sandglass.lnk").write_bytes(b"shortcut")
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, product_key) as key:
+            winreg.SetValueEx(key, "InstallDir", 0, winreg.REG_SZ, str(install_dir))
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, uninstall_key) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Sandglass")
+            winreg.SetValueEx(
+                key, "UninstallString", 0, winreg.REG_SZ, str(uninstaller)
+            )
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+        ) as key:
+            winreg.SetValueEx(
+                key,
+                run_value,
+                0,
+                winreg.REG_SZ,
+                f'"{install_dir / "Sandglass.exe"}"',
+            )
+
+        shortcut = shortcut_dir / "Sandglass.lnk"
+        probe = _UninstallProbe(
+            install_dir=install_dir,
+            uninstaller=uninstaller,
+            shortcut=shortcut,
+            desktop_mutex=desktop_mutex,
+            product_key=product_key,
+            uninstall_key=uninstall_key,
+            run_value=run_value,
+            files_before=_tree_snapshot(install_dir),
+            shortcut_before=shortcut.read_bytes(),
+            reg_before={},
+        )
+        probe.reg_before = probe.registration()
+        self.assertEqual(probe.reg_before["install_dir"], str(install_dir))
+        self.assertEqual(probe.reg_before["display_name"], "Sandglass")
+        self.assertIsNotNone(probe.reg_before["run"])
+        return probe
+
+    def _run_uninstaller(self, probe: _UninstallProbe, env: dict[str, str]):
+        return subprocess.run(
+            [str(probe.uninstaller), "/S", f"_?={probe.install_dir}"],
+            cwd=str(probe.install_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+    def test_held_desktop_mutex_refuses_uninstall_and_stopped_uninstall_still_succeeds(
+        self,
+    ):
+        """A held desktop mutex must fail closed before any product deletion.
+
+        The rename-based gate accepted this state: Windows allows renaming a
+        loaded PyInstaller Sandglass.exe, so Uninstall.exe /S returned 0 and
+        deleted registration, Run, shortcuts, and most files while the panel
+        kept running. Restoring that rename probe must make this test fail
+        specifically because that partial uninstall is accepted.
+        """
+        with tempfile.TemporaryDirectory(prefix="sg-uninst-") as tmp:
+            root = Path(tmp)
+            sandglass_home = root / "sandglass-home"
+            sandglass_home.mkdir()
+            home_before = _tree_snapshot(sandglass_home)
+            env = os.environ.copy()
+            env["SANDGLASS_HOME"] = str(sandglass_home)
+
+            correct = self._prepare_probe(root / "correct", restore_rename=False)
+            try:
+                with _HeldMutex(correct.desktop_mutex):
+                    refused = self._run_uninstaller(correct, env)
+                    self.assertEqual(
+                        refused.returncode,
+                        9,
+                        refused.stdout + refused.stderr,
+                    )
+                    self.assertEqual(
+                        _tree_snapshot(correct.install_dir), correct.files_before
+                    )
+                    self.assertEqual(correct.registration(), correct.reg_before)
+                    self.assertTrue((correct.install_dir / "Sandglass.exe").is_file())
+                    self.assertTrue((correct.install_dir / "Uninstall.exe").is_file())
+                    self.assertTrue(
+                        (correct.install_dir / "owner-custom" / "keep.txt").is_file()
+                    )
+                    self.assertEqual(
+                        correct.shortcut.read_bytes(), correct.shortcut_before
+                    )
+                    self.assertEqual(_tree_snapshot(sandglass_home), home_before)
+
+                succeeded = self._run_uninstaller(correct, env)
+                self.assertEqual(
+                    succeeded.returncode, 0, succeeded.stdout + succeeded.stderr
+                )
+                self.assertFalse((correct.install_dir / "Sandglass.exe").exists())
+                self.assertFalse((correct.install_dir / "_internal").exists())
+                self.assertFalse(
+                    (correct.install_dir / "THIRD_PARTY_LICENSES").exists()
+                )
+                self.assertTrue(
+                    (correct.install_dir / "owner-custom" / "keep.txt").is_file()
+                )
+                self.assertIsNone(correct.registration()["install_dir"])
+                self.assertIsNone(correct.registration()["display_name"])
+                self.assertIsNone(correct.registration()["run"])
+                self.assertFalse(correct.shortcut.exists())
+                self.assertEqual(_tree_snapshot(sandglass_home), home_before)
+            finally:
+                correct.cleanup_registry()
+
+            mutated = self._prepare_probe(root / "mutated", restore_rename=True)
+            try:
+                with _HeldMutex(mutated.desktop_mutex):
+                    accepted = self._run_uninstaller(mutated, env)
+
+                    def assert_held_mutex_refuses() -> None:
+                        self.assertNotEqual(accepted.returncode, 0)
+                        self.assertEqual(
+                            _tree_snapshot(mutated.install_dir),
+                            mutated.files_before,
+                        )
+                        self.assertEqual(
+                            mutated.registration(), mutated.reg_before
+                        )
+                        self.assertTrue(mutated.shortcut.is_file())
+                        self.assertEqual(
+                            mutated.shortcut.read_bytes(), mutated.shortcut_before
+                        )
+
+                    with self.assertRaises(AssertionError):
+                        assert_held_mutex_refuses()
+                    self.assertEqual(
+                        accepted.returncode,
+                        0,
+                        "rename-gate mutation must accept uninstall while the "
+                        f"desktop mutex is held, got {accepted.returncode}",
+                    )
+                    self.assertFalse(
+                        (mutated.install_dir / "Sandglass.exe").exists(),
+                        "rename-gate mutation must delete product files while "
+                        "the desktop mutex is held",
+                    )
+                    self.assertIsNone(
+                        mutated.registration()["run"],
+                        "rename-gate mutation must delete registration while "
+                        "the desktop mutex is held",
+                    )
+                    self.assertFalse(
+                        mutated.shortcut.exists(),
+                        "rename-gate mutation must delete the shortcut while "
+                        "the desktop mutex is held",
+                    )
+                    self.assertEqual(_tree_snapshot(sandglass_home), home_before)
+            finally:
+                mutated.cleanup_registry()
 
 
 if __name__ == "__main__":

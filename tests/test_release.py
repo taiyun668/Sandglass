@@ -241,8 +241,15 @@ class ReleaseMetadataTests(unittest.TestCase):
         # last error is gone. The branch had never run, so nothing caught it
         # until the observer mutex was genuinely free and the probe answered
         # "Windows could not verify" for a mutex nobody held.
-        probes = [line for line in installer.splitlines() if "OpenMutexW" in line]
-        self.assertEqual(len(probes), 3, probes)
+        probes = [
+            line for line in installer.splitlines()
+            if "System::Call" in line and "OpenMutexW" in line
+        ]
+        self.assertEqual(len(probes), 4, probes)
+        desktop_probes = [line for line in probes if "Desktop.SingleInstance" in line]
+        observer_probes = [line for line in probes if "Observer.SingleInstance" in line]
+        self.assertEqual(len(desktop_probes), 2, desktop_probes)
+        self.assertEqual(len(observer_probes), 2, observer_probes)
         for probe in probes:
             self.assertTrue(probe.rstrip().endswith("? e'"), probe.strip())
         self.assertNotIn("kernel32::GetLastError()", installer)
@@ -264,13 +271,25 @@ class ReleaseMetadataTests(unittest.TestCase):
         # the uninstaller must still avoid recursively deleting a user-chosen
         # install directory.
         uninstall = installer.split('Section "Uninstall"', 1)[1]
-        rename_probe = uninstall.split(
-            r'Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"', 1
-        )[1].split('Abort', 1)[0]
-        self.assertIn("SetErrorLevel 9", rename_probe)
+        desktop_probe = uninstall.split(
+            "Call un.CheckSandglassDesktopMutex", 1
+        )[1].split('${If} ${FileExists} "$INSTDIR\\Sandglass.exe"', 1)[0]
+        self.assertIn("SetErrorLevel 9", desktop_probe)
+        self.assertIn("SetErrorLevel 10", desktop_probe)
+        self.assertLess(
+            uninstall.index("Call un.CheckSandglassDesktopMutex"),
+            uninstall.index("DeleteRegKey"),
+        )
+        self.assertLess(
+            uninstall.index("Abort"),
+            uninstall.index("DeleteRegKey"),
+        )
+        self.assertNotIn("Sandglass.exe.removing", uninstall)
         self.assertNotIn('RMDir /r "$INSTDIR"', uninstall)
         self.assertIn(r'RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"', installer)
         self.assertIn('"/S"', installer_smoke)
+        self.assertIn("Uninstalling while the desktop is running returned", installer_smoke)
+        self.assertIn("expected 9", installer_smoke)
         self.assertIn("--self-test", installer_smoke)
         self.assertIn("Get-TreeSnapshot $providerRoot", installer_smoke)
         self.assertNotIn("RequireSigned", installer_smoke)
@@ -1422,15 +1441,38 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         """--stop alone is not enough: the panel supervises the observer.
 
         A running panel puts a stopped observer back within the minute, which
-        would land in the middle of the uninstall. The panel is Sandglass.exe,
-        so the same rename proves nothing is left holding it.
+        would land in the middle of the uninstall. Rename of Sandglass.exe is
+        not that proof: Windows allows renaming a loaded PyInstaller image.
+        The desktop mutex is the same authority the installer already uses.
         """
         section = self._section('Section "Uninstall"')
-        remove = section.index("RMDir /r")
-        self.assertIn("Rename", section)
-        self.assertIn("${Errors}", section)
-        self.assertLess(section.index("Abort"), remove,
-                        "面板还在跑时必须中止，而不是删一半")
+        mutex = self._directive_line(
+            section, lambda line: "un.CheckSandglassDesktopMutex" in line
+        )
+        remove = self._directive_line(
+            section, lambda line: line.strip().startswith("RMDir /r ")
+            and "\\_internal" in line
+        )
+        delete_reg = self._directive_line(
+            section,
+            lambda line: 'DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass"' in line,
+        )
+        delete_run = self._directive_line(
+            section,
+            lambda line: 'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"' in line,
+        )
+        self.assertNotIn("Sandglass.exe.removing", section)
+        self.assertFalse(
+            any("Rename" in line for _, line in self._real_directives(section)),
+            "uninstall must not use Rename as the desktop-running test",
+        )
+        self.assertIn("SetErrorLevel 9", section)
+        self.assertIn("SetErrorLevel 10", section)
+        self.assertIn("${IfNot} ${Silent}", section)
+        self.assertLess(mutex, remove, "面板还在跑时必须中止，而不是删一半")
+        self.assertLess(mutex, delete_reg)
+        self.assertLess(mutex, delete_run)
+        self.assertLess(section.index("Abort"), section.index("DeleteRegKey"))
 
     def test_the_state_directory_is_still_preserved(self):
         """The counterpart: stopping is not licence to delete the books."""

@@ -1143,8 +1143,47 @@ Function un.CheckSandglassMutex
   ${EndIf}
 FunctionEnd
 
+Function un.CheckSandglassDesktopMutex
+  ; Same fail-closed OpenMutexW capture as the installer. A PyInstaller
+  ; executable may be renamed while its process is still alive, so Rename of
+  ; Sandglass.exe is not evidence that this mutex is free.
+  System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "Local\Sandglass.Desktop.SingleInstance") p .r3 ? e'
+  Pop $4
+  ${If} $3 != 0
+    System::Call 'kernel32::CloseHandle(p r3)'
+    Push "held"
+  ${Else}
+    ${If} $4 == 2
+      Push "free"
+    ${Else}
+      Push "unknown"
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
   SetShellVarContext current
+
+  ; Ask the desktop mutex before any deletion. --stop reaches only the
+  ; observer; a running panel puts it back, and the previous Rename of
+  ; Sandglass.exe was allowed by Windows while that panel still held this
+  ; mutex. Distinct codes: an abort otherwise reports NSIS's generic 2.
+  ; /S does not suppress MessageBox, so silent refusal must not wait on one.
+  Call un.CheckSandglassDesktopMutex
+  Pop $R1
+  ${If} $R1 == "held"
+    SetErrorLevel 9
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run the uninstaller again."
+    ${EndIf}
+    Abort
+  ${ElseIf} $R1 != "free"
+    SetErrorLevel 10
+    ${IfNot} ${Silent}
+      MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass is still running. The uninstaller will not remove it."
+    ${EndIf}
+    Abort
+  ${EndIf}
 
   ; Stop observing before removing the program. The observer outlives the panel
   ; by design, so an uninstall that only deletes files leaves it running -- out
@@ -1157,33 +1196,26 @@ Section "Uninstall"
     ExecWait '"$INSTDIR\Sandglass.exe" --stop' $0
     ${If} $0 != 0
       SetErrorLevel 6
-      MessageBox MB_ICONSTOP "Sandglass could not confirm that its background observer stopped. Quit Sandglass from the tray icon and run the uninstaller again."
+      ${IfNot} ${Silent}
+        MessageBox MB_ICONSTOP "Sandglass could not confirm that its background observer stopped. Quit Sandglass from the tray icon and run the uninstaller again."
+      ${EndIf}
       Abort
     ${EndIf}
-    ; Distinct codes: an abort otherwise reports NSIS's generic 2 and the smoke
-    ; cannot say which gate fired or why.
     Call un.CheckSandglassMutex
     Pop $R1
     ${If} $R1 == "held"
       SetErrorLevel 7
-      MessageBox MB_ICONSTOP "Sandglass's background observer is still running. Quit Sandglass from the tray icon and run the uninstaller again."
+      ${IfNot} ${Silent}
+        MessageBox MB_ICONSTOP "Sandglass's background observer is still running. Quit Sandglass from the tray icon and run the uninstaller again."
+      ${EndIf}
       Abort
     ${ElseIf} $R1 != "free"
       SetErrorLevel 8
-      MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass's background observer is running. The uninstaller will not remove it."
+      ${IfNot} ${Silent}
+        MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass's background observer is running. The uninstaller will not remove it."
+      ${EndIf}
       Abort
     ${EndIf}
-    ; Stopping the observer is not enough on its own: a running panel supervises
-    ; it and puts it back within the minute, which would land in the middle of
-    ; this. The panel is Sandglass.exe, so renaming it proves nothing is left.
-    ClearErrors
-    Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"
-    ${If} ${Errors}
-      SetErrorLevel 9
-      MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run the uninstaller again."
-      Abort
-    ${EndIf}
-    Rename "$INSTDIR\Sandglass.exe.removing" "$INSTDIR\Sandglass.exe"
   ${EndIf}
 
   Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
