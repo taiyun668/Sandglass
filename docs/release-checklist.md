@@ -23,6 +23,18 @@ uninstall, physical UI acceptance, and a real provider-state transition pass.
 The updater's `latest` query intentionally cannot see this pre-release. Promote
 this same release only after the second-machine gates below pass.
 
+A second LAN Windows 11 Pro machine supplied a real active desktop acceptance
+surface. Its Smart App Control policy rejected the exact published setup asset
+before process creation (`Code Integrity` 3033/3077 and SAC 3118); the file was
+`NotSigned`, and its SHA-256 matched the Release. The portable executable did
+start in that machine's interactive console session, both without and with an
+Internet Zone mark. A direct top-level-window measurement showed the 380x650
+WPF panel on-screen beside the 56x56 orb, and a captured desktop frame confirmed
+the Overview, provider navigation, mode choice and autostart prompt. This proves
+the portable GUI path, not the installer or update path. Windows Sandbox is now
+enabled on that host and the isolated installer/bundle/update suite is staged;
+it still needs one interactive user login before Windows can launch the sandbox.
+
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
 
