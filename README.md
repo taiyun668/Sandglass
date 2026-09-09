@@ -99,11 +99,11 @@ Sandglass 自己的缓存、额度快照和归属台账写在 `%LOCALAPPDATA%\sa
 需要 Python 3.12+。核心仅额外依赖 OpenTelemetry 官方生成的 protobuf
 消息类型，用于接收厂商客户端主动发送的 OTLP 日志。
 
-Windows x64 unsigned 预览版 `v0.1.1` 已发布，可从
-[GitHub Releases](https://github.com/taiyun668/Sandglass/releases/tag/v0.1.1)
-下载 per-user 安装包和 portable ZIP。首次运行时 Windows 通常会要求确认；这不是稳定版，
+Windows x64 unsigned 版本可从
+[GitHub Releases](https://github.com/taiyun668/Sandglass/releases)
+下载 per-user 安装包和 portable ZIP。首次运行时 Windows 通常会要求确认；预览版不是稳定版，
 随包的可执行文件仍未做 Authenticode 签名。启用 Smart App Control 的 Windows 可能直接
-拦截 unsigned setup；这时不要关闭系统安全策略，改用 portable ZIP 试用或等待签名版。
+拦截 unsigned setup；这时不要关闭系统安全策略，该机器只能尝试 portable ZIP。
 后续更新只有在下载内容与带维护者签名的
 `SHA256SUMS.windows` 清单匹配后才会交给安装器。仍可从源码 checkout 运行：
 

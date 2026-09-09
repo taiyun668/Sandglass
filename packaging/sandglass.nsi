@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "x64.nsh"
 
 !ifndef APPVERSION
-  !define APPVERSION "0.1.1"
+  !define APPVERSION "0.1.2"
 !endif
 !ifndef SOURCEDIR
   !define SOURCEDIR "..\dist\Sandglass"
