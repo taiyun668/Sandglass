@@ -719,7 +719,7 @@ try {
             throw "Fault-injected update unexpectedly returned exit code 0."
         }
         $phase = Read-UpdateFailurePhase
-        if ($phase -notlike "fault-post-activation*") {
+        if ($phase -notlike "fault-post-ready-launch*") {
             throw "Fault-injected update reported unexpected phase=$phase."
         }
     } elseif ($updateProcess.ExitCode -ne 0) {

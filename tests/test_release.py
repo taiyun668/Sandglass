@@ -404,7 +404,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("    exit 1", script)
         self.assertIn("UPDATE SMOKE CLEANUP FAILED", script)
         self.assertIn("$ExpectRollback", script)
-        self.assertIn('phase -notlike "fault-post-activation*"', script)
+        self.assertIn('phase -notlike "fault-post-ready-launch*"', script)
         self.assertIn("did not restore the old build provenance", script)
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell is required")
@@ -1175,6 +1175,11 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         ):
             self.assertIn(directive, after_activation, directive)
         self.assertIn('SANDGLASS_TEST_FAULT_POST_ACTIVATION', installer)
+        fault = section.index('StrCpy $UpdatePhase "fault-post-ready-launch"')
+        launch = section.index('Call LaunchUpdateDesktop')
+        ready_wait = section.index('Call WaitForUpdateReady')
+        self.assertLess(launch, fault)
+        self.assertLess(fault, ready_wait)
         failure = installer.split("Function UpdateFailure", 1)[1].split("FunctionEnd", 1)[0]
         self.assertIn('$UpdateActivated == 1', failure)
         self.assertLess(

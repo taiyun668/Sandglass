@@ -970,21 +970,6 @@ Section "Sandglass" SecMain
     ${EndIf}
     Abort
   ${EndIf}
-!ifdef SANDGLASS_TEST_FAULT_POST_ACTIVATION
-  ; Test-only fault is deliberately after the shortcut and partial registry
-  ; writes, so smoke proves the real rollback rather than an early abort.
-  ${If} $UpdateMode == 1
-    ClearErrors
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName" "Sandglass"
-    ${If} ${Errors}
-      StrCpy $UpdatePhase "fault-precondition-write"
-      Call UpdateFailure
-    ${EndIf}
-    StrCpy $UpdatePhase "fault-post-activation"
-    Call UpdateFailure
-  ${EndIf}
-!endif
-
   ; A portable install may have an explicit sandglass Run value pointing to
   ; the portable executable. Preserve its arguments and value kind while
   ; moving that opt-in to the installed executable. No value means no opt-in.
@@ -1111,6 +1096,13 @@ Section "Sandglass" SecMain
       StrCpy $UpdatePhase "ready-launch"
       Call UpdateFailure
     ${EndIf}
+!ifdef SANDGLASS_TEST_FAULT_POST_ACTIVATION
+    ; Test-only fault is deliberately after the new desktop child exists.
+    ; This forces StopFailedUpdateChild to terminate that exact child and then
+    ; proves the complete post-activation rollback path before readiness.
+    StrCpy $UpdatePhase "fault-post-ready-launch"
+    Call UpdateFailure
+!endif
     Call WaitForUpdateReady
     ${If} $UpdateReadyHandle != ""
       System::Call 'kernel32::CloseHandle(p $UpdateReadyHandle)'
