@@ -336,6 +336,15 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('Get-TreeSnapshot $providerRoot', script)
         self.assertIn('Provider fixtures changed during update', script)
         self.assertIn('SANDGLASS_HOME was removed by uninstall', script)
+        self.assertNotIn(
+            'Wait-Until { -not (Test-Path -LiteralPath $installDir) }', script
+        )
+        self.assertIn(
+            'Registered uninstall left a Sandglass-owned path behind', script
+        )
+        self.assertIn('Get-TreeSnapshot $customRoot', script)
+        self.assertIn('Uninstall removed or changed owner files', script)
+        self.assertIn('$remainingTopLevel[0] -cne "owner-custom"', script)
         self.assertIn('Remove-SmokeRoot', script)
         self.assertNotIn('Stop-Process -Name', script)
         self.assertNotIn('Invoke-WebRequest', script)
@@ -382,7 +391,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("$uninstallAttempted", script)
         self.assertIn('-ArgumentList "/S"', script)
         self.assertNotIn('"_?=$installDir"', script)
-        self.assertIn('Wait-Until { -not (Test-Path -LiteralPath $installDir) }', script)
+        self.assertIn("$installedOwnedPaths", script)
+        self.assertIn("$customUnderInstallDir", script)
+        self.assertIn("Registered uninstall left a Sandglass-owned path behind", script)
         self.assertIn("$updateStagePath", script)
         self.assertIn("$updateFailureLog", script)
         self.assertIn("if ($null -ne $failure) {", script)

@@ -472,6 +472,9 @@ $updateStagePath = $null
 $updateBackupPath = $null
 $updateShortcutBackupPath = $null
 $customFileHash = $null
+$customTreeSnapshot = $null
+$customUnderInstallDir = $false
+$installedOwnedPaths = @()
 $uninstallerPath = $null
 $uninstallAttempted = $false
 $failure = $null
@@ -639,6 +642,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $customFile), $customEmptyDir | Out-Null
     [IO.File]::WriteAllText($customFile, "owner data that must survive update`r`n")
     $customFileHash = Get-Sha256 $customFile
+    $customTreeSnapshot = Get-TreeSnapshot (Split-Path -Parent $customFile)
     $oldShortcutState = Get-ShortcutState $shortcutPath
     Save-RunValue ([ref]$installedRunValueState)
     if ($installedRunValueState.Existed -ne $oldRunValueState.Existed -or
@@ -813,6 +817,29 @@ try {
         $uninstallerPath = Join-Path $installDir "unins000.exe"
     }
     if (-not (Test-Path -LiteralPath $uninstallerPath)) { throw "Updated uninstaller is missing." }
+    $ownedManifestPath = Join-Path $installDir "Sandglass-owned-paths.json"
+    try {
+        $ownedManifest = Get-Content -LiteralPath $ownedManifestPath -Raw | ConvertFrom-Json
+        $installedOwnedPaths = @($ownedManifest.paths)
+    } catch {
+        throw "Updated product paths manifest is unreadable: $($_.Exception.Message)"
+    }
+    if ($ownedManifest.schema -ne 1 -or $installedOwnedPaths.Count -eq 0) {
+        throw "Updated product paths manifest is invalid."
+    }
+    foreach ($relative in $installedOwnedPaths) {
+        if (-not ($relative -is [string]) -or [string]::IsNullOrWhiteSpace($relative) -or
+            [IO.Path]::IsPathRooted($relative) -or $relative -match '[/\\]' -or
+            $relative -in @(".", "..")) {
+            throw "Updated product paths manifest contains an unsafe path."
+        }
+        Assert-UnderSmokeRoot (Join-Path $installDir $relative)
+    }
+    $installPrefix = $installDir.TrimEnd([IO.Path]::DirectorySeparatorChar) +
+        [IO.Path]::DirectorySeparatorChar
+    $customRoot = Get-FullPath (Split-Path -Parent $customFile)
+    $customUnderInstallDir = $customRoot.StartsWith(
+        $installPrefix, [StringComparison]::OrdinalIgnoreCase)
     # Use the same self-copy path as the registered uninstaller. Passing
     # _?=$installDir forces it to execute in place, which makes its own file and
     # directory undeletable and creates a smoke-only residue the real user path
@@ -823,8 +850,23 @@ try {
     $null = Wait-ProcessExitBounded $uninstall 120 "Updated uninstaller"
     $uninstall.Refresh()
     if ($uninstall.ExitCode -ne 0) { throw "Updated uninstaller returned exit code $($uninstall.ExitCode)." }
-    $null = Wait-Until { -not (Test-Path -LiteralPath $installDir) } 30 `
-        "Registered uninstall path did not remove the temporary install directory."
+    $null = Wait-Until {
+        @($installedOwnedPaths | Where-Object {
+            Test-Path -LiteralPath (Join-Path $installDir $_)
+        }).Count -eq 0
+    } 30 "Registered uninstall left a Sandglass-owned path behind."
+    if ((Get-TreeSnapshot $customRoot) -cne $customTreeSnapshot) {
+        throw "Uninstall removed or changed owner files."
+    }
+    if ($customUnderInstallDir) {
+        $remainingTopLevel = @(Get-ChildItem -LiteralPath $installDir -Force |
+            Select-Object -ExpandProperty Name)
+        if ($remainingTopLevel.Count -ne 1 -or $remainingTopLevel[0] -cne "owner-custom") {
+            throw "Uninstall left content outside the preserved owner directory."
+        }
+    } elseif (Test-Path -LiteralPath $installDir) {
+        throw "Registered uninstall left the product installation directory behind."
+    }
     if (-not (Test-Path -LiteralPath $sandglassHome -PathType Container)) {
         throw "SANDGLASS_HOME was removed by uninstall."
     }
@@ -926,11 +968,11 @@ finally {
 
         try {
             if ($uninstallAttempted) {
-                foreach ($target in @(
-                    $installDir,
-                    (Join-Path $installDir "Sandglass.exe"),
-                    $uninstallerPath
-                )) {
+                $uninstallTargets = @(
+                    (Join-Path $installDir "Sandglass.exe"), $uninstallerPath
+                )
+                if (-not $customUnderInstallDir) { $uninstallTargets += $installDir }
+                foreach ($target in $uninstallTargets) {
                     if ($target -and (Test-Path -LiteralPath $target)) {
                         throw "Uninstall left temporary target behind: $target"
                     }
