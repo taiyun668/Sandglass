@@ -1,3 +1,3 @@
 """sandglass: this-machine usage meter for Codex, Claude, and Grok."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
