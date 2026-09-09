@@ -5,36 +5,43 @@ privacy or correctness boundary.
 
 ## Where this stands, and what to do next (2026-09-09)
 
-The canonical checkout is `D:\Sandglass`, and the product is stopped. The
-release source and tag `v0.1.1` resolve exactly to
-`7c59d8329b93a6a877da74d34bd85f8b3eff2bfc`.
-The updated unsigned preview is published. All five release assets came from
-CI run `34328424556`; their checksums, build provenance and product-owned path
-manifest were verified, and the Owner-signed `SHA256SUMS.windows` signature is
-valid. All four CI jobs succeeded. The maintenance machine's outside build
-produced the bundle but Windows Application Control blocked the new unsigned
-executable at its runtime self-test, so no local GUI/update smoke is claimed.
+The canonical checkout is `D:\Sandglass`, and the product is stopped. Public
+`main` and tag `v0.1.3` resolve exactly to
+`159c32ea08dacd596f98e44e8e998a718f1f3223`. `v0.1.3` is the current full
+GitHub Release. Its five assets came from tag CI run `34381003563`; their
+GitHub digests match the downloaded files, all three entries in
+`SHA256SUMS.windows` match, and the Owner signature verifies with the public
+key embedded in the updater. Both main run `34380591595` and the tag run
+completed all four jobs successfully.
+
 The dormant third-party Authenticode submission path has been removed from the
 release gate. No certificate, signing-service account or sponsor is required;
 the shipped binaries remain explicit unsigned community packages and automatic
 updates use the Owner-signed checksum manifest.
 
-The next gates belong to the Owner and a second machine: clean-machine install/
-uninstall, physical UI acceptance, and a real provider-state transition pass.
-The updater's `latest` query intentionally cannot see this pre-release. Promote
-this same release only after the second-machine gates below pass.
+The update state machine is accepted. Four NSIS register-family mismatches were
+found and mutation-locked. A normal `v0.1.1 -> v0.1.3` smoke passed on the
+maintenance machine and a second Windows machine; a fault injected after the
+new desktop child was created also passed termination, old-version restart,
+old-provenance restoration, residue cleanup, owner-state preservation and
+provider-fixture byte invariance. Both wrappers recorded their own process exit
+code 0. The full suite is 765 tests, test isolation exits 0, and a fresh
+Grok-4.6 audit of `edf241e` returned ACCEPT with no worker file changes.
+
+The production feed is also live: the actual public `v0.1.1` source reads
+`/releases/latest` and receives a `v0.1.3` offer whose exact installer digest
+matches and whose manifest signature is valid; a `v0.1.3` client receives no
+offer. The remaining product observations are the Owner-visible in-app click
+sequence and a real provider-state transition, not release construction.
 
 A second LAN Windows 11 Pro machine supplied a real active desktop acceptance
-surface. Its Smart App Control policy rejected the exact published setup asset
-before process creation (`Code Integrity` 3033/3077 and SAC 3118); the file was
-`NotSigned`, and its SHA-256 matched the Release. The portable executable did
-start in that machine's interactive console session, both without and with an
-Internet Zone mark. A direct top-level-window measurement showed the 380x650
-WPF panel on-screen beside the 56x56 orb, and a captured desktop frame confirmed
-the Overview, provider navigation, mode choice and autostart prompt. This proves
-the portable GUI path, not the installer or update path. Windows Sandbox is now
-enabled on that host and the isolated installer/bundle/update suite is staged;
-it still needs one interactive user login before Windows can launch the sandbox.
+surface. Earlier `v0.1.2` setup and portable candidates ran there, and equivalent
+private `v0.1.3` builds completed install and update. The exact public
+`v0.1.3` setup and portable hashes were later rejected before process creation
+by that machine's enforced Smart App Control policy (`Code Integrity` 3033/3077,
+policy `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`). This per-hash cloud/policy
+result is recorded as an unsigned-community compatibility limit; security was
+not disabled and another rebuild was not used to manufacture a green hash.
 
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
