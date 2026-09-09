@@ -43,6 +43,34 @@ class NativePanelTests(unittest.TestCase):
         panel.minimize()
         self.assertIsNone(panel.pending_show)
 
+    def test_ready_callback_requires_loaded_measured_open_visible_panel(self):
+        ready = Mock()
+        panel = NativePanel(
+            "http://127.0.0.1:7740/",
+            WEB_DIR / "assets" / "logo-mark.png",
+            '"pythonw.exe" "sandglass-desktop.pyw"',
+            on_minimized=Mock(), on_closed=Mock(), on_locale=Mock(),
+            on_ready=ready,
+        )
+        panel.ready = panel.has_measured_height = panel.open = True
+        panel.window = SimpleNamespace(IsVisible=False)
+        panel.scale = SimpleNamespace(ScaleX=0.0, ScaleY=0.0)
+        panel.clip = SimpleNamespace(RadiusX=0.0, RadiusY=0.0)
+        panel.orb_proxy = SimpleNamespace(Opacity=1.0, Visibility=None)
+        panel.web_host = SimpleNamespace(Opacity=0.0)
+        panel.outline = SimpleNamespace(Opacity=0.0)
+        panel.frame = SimpleNamespace(CacheMode="cached")
+        panel.t = {"Visibility": SimpleNamespace(Hidden="hidden")}
+        panel._clear_animations = Mock()
+        panel._apply_pending_height = Mock()
+
+        panel._finish_open()
+        ready.assert_not_called()
+
+        panel.window.IsVisible = True
+        panel._finish_open()
+        ready.assert_called_once_with()
+
     def test_hide_to_tray_releases_an_edge_dock(self):
         panel = self.panel()
         panel.dock = Mock()
@@ -121,6 +149,19 @@ class NativePanelTests(unittest.TestCase):
         panel.app.Run.assert_not_called()
         self.assertTrue(panel._started.is_set())
         self.assertTrue(panel._stopped.is_set())
+
+    def test_quit_reports_dispatcher_failure(self):
+        panel = self.panel()
+        panel.app = Mock()
+        panel.window = SimpleNamespace(
+            Dispatcher=SimpleNamespace(
+                BeginInvoke=Mock(side_effect=RuntimeError("dispatcher failed"))
+            )
+        )
+        panel.t = {"Action": lambda callback: callback}
+
+        self.assertFalse(panel.quit())
+        self.assertFalse(panel.quitting)
 
     def test_first_page_measurement_opens_at_final_height(self):
         panel = self.panel()

@@ -18,7 +18,7 @@ act rather than something CI can do unattended.
 
 .EXAMPLE
   ./tools/sign_release_manifest.ps1 -PrivateKey D:\keys\sandglass-release.xml `
-      -Manifest dist\SHA256SUMS.windows
+      -Manifest dist\SHA256SUMS.windows -Version 0.1.0
   # writes dist\SHA256SUMS.windows.sig next to it
 #>
 [CmdletBinding()]
@@ -26,7 +26,8 @@ param(
     [switch]$NewKey,
     [switch]$NoBackup,
     [string]$PrivateKey,
-    [string]$Manifest
+    [string]$Manifest,
+    [string]$Version
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,6 +114,9 @@ if ($NewKey) {
 }
 
 if (-not $Manifest) { throw "-Manifest is required when not creating a key." }
+if (-not $Version -or $Version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "-Version is required when signing a release manifest (expected SemVer)."
+}
 function ConvertFrom-HexString([string]$text) {
     $bytes = New-Object byte[] ($text.Length / 2)
     for ($i = 0; $i -lt $bytes.Length; $i++) {
@@ -131,8 +135,32 @@ $point.X = ConvertFrom-HexString $lines[1].Trim()
 $point.Y = ConvertFrom-HexString $lines[2].Trim()
 $parameters.Q = $point
 $key = [System.Security.Cryptography.ECDsa]::Create($parameters)
-$payload = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Manifest))
+$manifestPath = (Resolve-Path -LiteralPath $Manifest).Path
+$existing = [System.Text.Encoding]::ASCII.GetString(
+    [System.IO.File]::ReadAllBytes($manifestPath))
+$versionLine = "# Sandglass-Version: $Version`n"
+$existingVersion = ""
+foreach ($line in ($existing -split "`r?`n")) {
+    if ($line -match '^#\s*Sandglass-Version:\s*([^\s#]+)\s*$') {
+        if ($existingVersion) {
+            throw "Manifest contains more than one Sandglass-Version metadata line."
+        }
+        $existingVersion = $Matches[1]
+    }
+}
+if ($existingVersion) {
+    if ($existingVersion -ne $Version) {
+        throw "Manifest version $existingVersion does not match requested release version $Version."
+    }
+} else {
+    # The version line is part of the signed payload, so a checksum manifest
+    # cannot be rebound to a higher tag after it was signed.
+    [System.IO.File]::WriteAllText(
+        $manifestPath, $versionLine + $existing,
+        [System.Text.Encoding]::ASCII)
+}
+$payload = [System.IO.File]::ReadAllBytes($manifestPath)
 $signature = $key.SignData($payload, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
-$out = "$((Resolve-Path -LiteralPath $Manifest).Path).sig"
+$out = "$manifestPath.sig"
 Set-Content -LiteralPath $out -Value ([System.BitConverter]::ToString($signature).Replace('-', '')) -Encoding ascii
 Write-Output "signed $Manifest -> $out"

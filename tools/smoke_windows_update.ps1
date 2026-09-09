@@ -1,11 +1,14 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$OldInstaller,
-    [Parameter(Mandatory = $true)]
     [string]$NewInstaller,
     [Parameter(Mandatory = $true)]
     [string]$ExpectedGitCommit,
-    [switch]$ExpectRollback
+    [switch]$ExpectRollback,
+    [switch]$PortableHandoff,
+    [string]$RequestedSmokeRoot,
+    [string]$CandidateBundle,
+    [string]$NsisCompiler
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,24 +24,49 @@ function Get-Sha256([string]$Path) {
     }
 }
 
+function Get-ShortcutState([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ Existed = $false; Length = 0; SHA256 = $null }
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    return [pscustomobject]@{
+        Existed = $true
+        Length = [int64]$item.Length
+        SHA256 = Get-Sha256 $Path
+    }
+}
+
+function Assert-ShortcutState([string]$Path, [psobject]$Expected, [string]$Label) {
+    $actual = Get-ShortcutState $Path
+    if ($actual.Existed -ne $Expected.Existed -or
+        $actual.Length -ne $Expected.Length -or
+        $actual.SHA256 -ne $Expected.SHA256) {
+        throw "$Label changed the Start Menu shortcut."
+    }
+}
+
 function Get-FullPath([string]$Path) {
     return [System.IO.Path]::GetFullPath($Path)
 }
 
 $oldInstallerPath = Get-FullPath $OldInstaller
-$newInstallerPath = Get-FullPath $NewInstaller
-foreach ($path in @($oldInstallerPath, $newInstallerPath)) {
+$newInstallerPath = if ($NewInstaller) { Get-FullPath $NewInstaller } else { $null }
+foreach ($path in @($oldInstallerPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Installer not found: $path"
     }
 }
-if ($oldInstallerPath.Equals($newInstallerPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "OldInstaller and NewInstaller must be different files."
+if ($PortableHandoff -and (-not $CandidateBundle -or -not $NsisCompiler)) {
+    throw "PortableHandoff requires CandidateBundle and NsisCompiler."
 }
-$oldInstallerHash = Get-Sha256 $oldInstallerPath
-$newInstallerHash = Get-Sha256 $newInstallerPath
-if ($oldInstallerHash -eq $newInstallerHash) {
-    throw "OldInstaller and NewInstaller have the same SHA256; an update cannot be proven."
+if ($ExpectRollback -and (-not $CandidateBundle -or -not $NsisCompiler)) {
+    throw "ExpectRollback requires CandidateBundle and NsisCompiler."
+}
+if (-not $PortableHandoff -and -not $ExpectRollback) {
+    if (-not $newInstallerPath -or
+        -not (Test-Path -LiteralPath $newInstallerPath -PathType Leaf)) {
+        throw "NewInstaller is required outside PortableHandoff mode."
+    }
 }
 
 if (-not ("SandglassSmoke.NativeMethods" -as [type])) {
@@ -102,7 +130,7 @@ function Get-TreeSnapshot([string]$Root) {
 }
 
 function Get-ProcessesFromInstall {
-    $prefix = (Get-FullPath $installDir).TrimEnd(
+    $prefix = (Get-FullPath $activeDir).TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     return @(Get-CimInstance Win32_Process -Filter "Name='Sandglass.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
@@ -199,7 +227,7 @@ function Stop-InstalledProcesses {
         Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
     }
     $null = Wait-Until { @(Get-ProcessesFromInstall).Count -eq 0 } 20 `
-        "Sandglass processes from $installDir did not stop."
+        "Sandglass processes from $activeDir did not stop."
 }
 
 function Invoke-InstalledStop {
@@ -328,9 +356,13 @@ function Save-RunValue([ref]$State) {
 
 function Restore-RunValue([psobject]$State) {
     if ($null -eq $State -or -not $State.Known) { return }
-    if (-not $State.KeyExisted -and -not $State.Existed) { return }
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
-        "Software\Microsoft\Windows\CurrentVersion\Run")
+    $keyPath = "Software\Microsoft\Windows\CurrentVersion\Run"
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath, $true)
+    if ($null -eq $key) {
+        if (-not $State.Existed) { return }
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath)
+    }
+    $removeEmptyKey = $false
     try {
         if ($State.Existed) {
             $key.SetValue("Sandglass", $State.Data, $State.Kind)
@@ -338,8 +370,15 @@ function Restore-RunValue([psobject]$State) {
             # Only this value is ours; preserve every unrelated Run value.
             $key.DeleteValue("Sandglass", $false)
         }
+        if (-not $State.KeyExisted) {
+            $removeEmptyKey = ($key.GetValueNames().Count -eq 0 -and
+                $key.GetSubKeyNames().Count -eq 0)
+        }
     } finally {
         $key.Dispose()
+    }
+    if ($removeEmptyKey) {
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKey($keyPath, $false)
     }
 }
 
@@ -378,8 +417,28 @@ function Assert-CommandLineIsUpdate([int]$ProcessId) {
 }
 
 $tempBase = Get-FullPath $env:TEMP
-$script:smokeRoot = Join-Path $tempBase ("SandglassUpdateSmoke-" + [guid]::NewGuid().ToString("N"))
-$script:installDir = Join-Path $smokeRoot "installed"
+$script:smokeRoot = if ($RequestedSmokeRoot) {
+    Get-FullPath $RequestedSmokeRoot
+} else {
+    Join-Path $tempBase ("SandglassUpdateSmoke-" + [guid]::NewGuid().ToString("N"))
+}
+$actualRootParent = Get-FullPath (Split-Path -Parent $smokeRoot)
+if (-not $actualRootParent.Equals(
+        $tempBase.TrimEnd([IO.Path]::DirectorySeparatorChar),
+        [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path -Leaf $smokeRoot) -notmatch '^SandglassUpdateSmoke-[0-9a-f]{32}$') {
+    throw "RequestedSmokeRoot must be a direct SandglassUpdateSmoke-<guid> child of TEMP."
+}
+if ($RequestedSmokeRoot -and (Test-Path -LiteralPath $smokeRoot)) {
+    throw "RequestedSmokeRoot must not already exist."
+}
+$script:installDir = Join-Path $smokeRoot "installed target"
+$script:portableDir = Join-Path $smokeRoot "portable"
+$script:activeDir = if ($PortableHandoff) { $portableDir } else { $installDir }
+$script:customFile = Join-Path $activeDir "owner-custom\keep-me.txt"
+$script:customEmptyDir = Join-Path $activeDir "owner-custom\empty-directory"
+$script:shortcutPath = Join-Path ([Environment]::GetFolderPath("Programs")) "Sandglass\Sandglass.lnk"
+$script:shortcutOriginalPath = Join-Path $smokeRoot "original-sandglass.lnk"
 $providerRoot = Join-Path $smokeRoot "providers"
 $sandglassHome = Join-Path $smokeRoot "sandglass-home"
 $claudeRoot = Join-Path $providerRoot "claude"
@@ -393,6 +452,10 @@ $oldUninstallKey = "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\San
 $oldInstallState = [pscustomobject]@{ Known = $false; Existed = $false; Exported = $false }
 $oldUninstallState = [pscustomobject]@{ Known = $false; Existed = $false; Exported = $false }
 $oldRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
+$installedRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
+$oldShortcutState = $null
+$originalShortcutState = $null
+$originalShortcutDirectoryExisted = $false
 $oldEnvironment = @{
     CLAUDE_CONFIG_DIR = $env:CLAUDE_CONFIG_DIR
     CODEX_HOME = $env:CODEX_HOME
@@ -403,8 +466,12 @@ $oldPanelPid = $null
 $updateProcess = $null
 $newPanelPid = $null
 $updateFailureLog = $null
+$updateReadyEventName = $null
+$updateReadyEvent = $null
 $updateStagePath = $null
 $updateBackupPath = $null
+$updateShortcutBackupPath = $null
+$customFileHash = $null
 $uninstallerPath = $null
 $uninstallAttempted = $false
 $failure = $null
@@ -446,13 +513,19 @@ try {
         throw "A Sandglass.exe process is already running; stop the real product before this smoke."
     }
 
-    foreach ($path in @($smokeRoot, $installDir, $providerRoot, $sandglassHome,
+    foreach ($path in @($smokeRoot, $installDir, $portableDir, $activeDir,
+                        $customFile, $customEmptyDir, $providerRoot, $sandglassHome,
                         $claudeRoot, $codexRoot, $grokRoot, $registryRoot)) {
         Assert-UnderSmokeRoot $path
     }
     New-Item -ItemType Directory -Force -Path @(
-        $installDir, $claudeRoot, $codexRoot, $grokRoot, $sandglassHome, $registryRoot
+        $installDir, $portableDir, $claudeRoot, $codexRoot, $grokRoot, $sandglassHome, $registryRoot
     ) | Out-Null
+    $originalShortcutState = Get-ShortcutState $shortcutPath
+    $originalShortcutDirectoryExisted = Test-Path -LiteralPath (Split-Path -Parent $shortcutPath) -PathType Container
+    if ($originalShortcutState.Existed) {
+        Copy-Item -LiteralPath $shortcutPath -Destination $shortcutOriginalPath -Force
+    }
     [IO.File]::WriteAllText((Join-Path $claudeRoot ".credentials.json"), '{"fixture":"claude"}')
     [IO.File]::WriteAllText((Join-Path $codexRoot "auth.json"), '{"fixture":"codex"}')
     [IO.File]::WriteAllText((Join-Path $grokRoot "auth.json"), '{"fixture":"grok"}')
@@ -467,25 +540,123 @@ try {
     $env:GROK_HOME = $grokRoot
     $env:SANDGLASS_HOME = $sandglassHome
 
-    $oldInstall = Start-Process -FilePath $oldInstallerPath -ArgumentList @(
-        "/S", "/D=$installDir"
-    ) -PassThru -WindowStyle Hidden
+    if ($PortableHandoff -or $ExpectRollback) {
+        $candidateBundlePath = Get-FullPath $CandidateBundle
+        $nsisCompilerPath = Get-FullPath $NsisCompiler
+        $nsiPath = Get-FullPath (Join-Path $PSScriptRoot "..\packaging\sandglass.nsi")
+        foreach ($requiredPath in @($candidateBundlePath, $nsisCompilerPath, $nsiPath)) {
+            if (-not (Test-Path -LiteralPath $requiredPath)) {
+                throw "Candidate smoke input is missing: $requiredPath"
+            }
+        }
+        $candidate = Read-Provenance $candidateBundlePath
+        if ($candidate.git_head -ne $ExpectedGitCommit -or $candidate.git_dirty -ne $false) {
+            throw "CandidateBundle provenance does not equal ExpectedGitCommit."
+        }
+        $candidateArtifactName = if ($PortableHandoff) {
+            "portable-target-update"
+        } else {
+            "fault-injected-update"
+        }
+        $compilerArgs = @(
+            "/V2", "/WX",
+            "/DAPPVERSION=$($candidate.project_version)",
+            "/DSOURCEDIR=$candidateBundlePath",
+            "/DARTIFACTDIR=$smokeRoot",
+            "/DARTIFACTNAME=$candidateArtifactName"
+        )
+        if ($PortableHandoff) {
+            $compilerArgs += "/DSANDGLASS_TEST_UPDATE_TARGET=$installDir"
+        }
+        if ($ExpectRollback) {
+            $compilerArgs += "/DSANDGLASS_TEST_FAULT_POST_ACTIVATION"
+        }
+        $compilerArgs += $nsiPath
+        & $nsisCompilerPath @compilerArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Candidate NSIS compilation failed with exit code $LASTEXITCODE."
+        }
+        $newInstallerPath = Join-Path $smokeRoot "$candidateArtifactName.exe"
+    }
+    if (-not $newInstallerPath -or
+        -not (Test-Path -LiteralPath $newInstallerPath -PathType Leaf)) {
+        throw "New update installer is missing: $newInstallerPath"
+    }
+    if ($oldInstallerPath.Equals($newInstallerPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "OldInstaller and NewInstaller must be different files."
+    }
+    $oldInstallerHash = Get-Sha256 $oldInstallerPath
+    $newInstallerHash = Get-Sha256 $newInstallerPath
+    if ($oldInstallerHash -eq $newInstallerHash) {
+        throw "OldInstaller and NewInstaller have the same SHA256; an update cannot be proven."
+    }
+
+    # NSIS requires /D to be the final argument and consumes the rest of the
+    # command line as the directory; quoting the value becomes part of it.
+    $oldInstallArgs = '/S /D=' + $activeDir
+    $oldInstall = Start-Process -FilePath $oldInstallerPath `
+        -ArgumentList $oldInstallArgs -PassThru -WindowStyle Hidden
     $null = Wait-ProcessExitBounded $oldInstall 90 "Old installer"
     $oldInstall.Refresh()
     if ($oldInstall.ExitCode -ne 0) {
         throw "Old installer returned exit code $($oldInstall.ExitCode)."
     }
-    $oldExe = Join-Path $installDir "Sandglass.exe"
+    $oldExe = Join-Path $activeDir "Sandglass.exe"
     if (-not (Test-Path -LiteralPath $oldExe -PathType Leaf)) {
         throw "Old installer did not create $oldExe."
     }
-    $oldProvenance = Read-Provenance $installDir
+    if ($PortableHandoff) {
+        # Turn the ordinary fixture install into the same shape as a portable
+        # download: no install registration, uninstaller, or installed-channel
+        # shortcut, but an explicit user opt-in Run value with a quoted path,
+        # arguments, and REG_EXPAND_SZ kind.
+        Restore-RegistryKey $oldInstallKey $oldInstallState
+        Restore-RegistryKey $oldUninstallKey $oldUninstallState
+        foreach ($uninstallerName in @("Uninstall.exe", "unins000.exe")) {
+            Remove-Item -LiteralPath (Join-Path $activeDir $uninstallerName) `
+                -Force -ErrorAction SilentlyContinue
+        }
+        $shortcutDirectory = Split-Path -Parent $shortcutPath
+        if ($originalShortcutState.Existed) {
+            Copy-Item -LiteralPath $shortcutOriginalPath -Destination $shortcutPath -Force
+        } else {
+            Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+            if (-not $originalShortcutDirectoryExisted) {
+                Remove-Item -LiteralPath $shortcutDirectory -ErrorAction SilentlyContinue
+            }
+        }
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
+            "Software\Microsoft\Windows\CurrentVersion\Run")
+        try {
+            $runKey.SetValue("Sandglass", ('"' + $oldExe + '" --background --fixture="portable path"'),
+                [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        } finally { $runKey.Dispose() }
+    }
+    $oldProvenance = Read-Provenance $activeDir
+    # A real installed directory can contain owner files beside the bundle.
+    # The update must preserve them; otherwise a recursive backup cleanup has
+    # silently destroyed user data while reporting success.
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $customFile), $customEmptyDir | Out-Null
+    [IO.File]::WriteAllText($customFile, "owner data that must survive update`r`n")
+    $customFileHash = Get-Sha256 $customFile
+    $oldShortcutState = Get-ShortcutState $shortcutPath
+    Save-RunValue ([ref]$installedRunValueState)
+    if ($installedRunValueState.Existed -ne $oldRunValueState.Existed -or
+        $installedRunValueState.KeyExisted -ne $oldRunValueState.KeyExisted -or
+        ($installedRunValueState.Existed -and
+         ($installedRunValueState.Kind -ne $oldRunValueState.Kind -or
+          $installedRunValueState.Data -ne $oldRunValueState.Data))) {
+        throw "Ordinary install changed the Sandglass Run value."
+    }
     $oldPanel = Wait-Until { Get-PanelProcess } 30 `
-        "Old installer did not leave a Sandglass panel running from the temp install directory."
+        "Old installer did not leave a Sandglass panel running from the temp source directory."
     $oldPanelPid = [int]$oldPanel.ProcessId
     $updateFailureLog = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid.failure.txt"
+    $updateReadyToken = [Guid]::NewGuid().ToString("N")
+    $updateReadyEventName = "Local\Sandglass.UpdateReady.$updateReadyToken"
     $updateStagePath = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid"
     $updateBackupPath = "$installDir.update-backup"
+    $updateShortcutBackupPath = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid-shortcut.lnk"
 
     $oldObserver = Wait-Until {
         $observer = @(Get-ObserverProcessesFromInstall)
@@ -497,14 +668,25 @@ try {
 
     # The updater must be alive and visibly in its dedicated progress mode while
     # the old panel is still holding the parent process handle.
-    $newArgs = @(
-        "/UPDATE", "/PARENTPID=$oldPanelPid", "/RESTARTEXE=$oldExe"
-    )
+    $newArgs = ('/UPDATE /PARENTPID=' + $oldPanelPid +
+        ' /RESTARTEXE="' + $oldExe + '" /UPDATE_TOKEN=' + $updateReadyToken)
     $updateProcess = Start-Process -FilePath $newInstallerPath -ArgumentList $newArgs `
         -PassThru
     $updateCommand = Assert-CommandLineIsUpdate $updateProcess.Id
     $updateWindow = Wait-Until { Get-VisibleUpdateProcess $updateProcess.Id } 15 `
         "The /UPDATE installer did not expose a visible titled progress window (phase=$(Read-UpdateFailurePhase))."
+    # Hold one handle for the whole handoff. Reopening the named event in a
+    # polling loop races the installer closing its last handle immediately
+    # after success and can falsely report a correct update as missing-ready.
+    if (-not $ExpectRollback) {
+        $updateReadyEvent = Wait-Until {
+            try {
+                return [Threading.EventWaitHandle]::OpenExisting($updateReadyEventName)
+            } catch [Threading.WaitHandleCannotBeOpenedException] {
+                return $null
+            }
+        } 15 "The update installer did not create its ready event."
+    }
 
     # Match the real in-app handoff: the panel quits after launching the
     # installer, while its detached observer remains for the installer itself
@@ -515,6 +697,17 @@ try {
     $null = Wait-Until { @(Get-ProcessesFromInstall | Where-Object { $_.ProcessId -eq $oldPanelPid }).Count -eq 0 } `
         15 "The old temp-installed panel did not exit."
 
+    $readySeen = $false
+    if (-not $ExpectRollback) {
+        $readySeen = Wait-Until {
+            if ($updateReadyEvent.WaitOne(0)) { return $true }
+            $updateProcess.Refresh()
+            if ($updateProcess.HasExited) {
+                throw "The update installer exited before emitting UI readiness (phase=$(Read-UpdateFailurePhase))."
+            }
+            return $false
+        } 120 "The new desktop did not emit its direct UI-ready event."
+    }
     $null = Wait-ProcessExitBounded $updateProcess 120 "Update installer"
     $updateProcess.Refresh()
     if ($ExpectRollback) {
@@ -528,29 +721,69 @@ try {
     } elseif ($updateProcess.ExitCode -ne 0) {
         $phase = Read-UpdateFailurePhase
         throw "Update installer returned exit code $($updateProcess.ExitCode), phase=$phase."
+    } elseif (-not $readySeen) {
+        throw "Update installer succeeded without observing the new desktop's direct UI-ready signal."
     }
 
+    if ($PortableHandoff) {
+        # Success activates the installed target; rollback must have restarted
+        # the original portable source and leave that source untouched.
+        $script:activeDir = if ($ExpectRollback) { $portableDir } else { $installDir }
+    }
     $newPanel = Wait-Until { Get-PanelProcess } 30 `
         "The update did not relaunch Sandglass from the same temp install directory."
     $newPanelPid = [int]$newPanel.ProcessId
     if (-not $newPanel.ExecutablePath.StartsWith(
-            $installDir + [IO.Path]::DirectorySeparatorChar,
+            $activeDir + [IO.Path]::DirectorySeparatorChar,
             [StringComparison]::OrdinalIgnoreCase)) {
         throw "Relaunched Sandglass is not from the temp install directory."
     }
 
-    $selfTest = Start-Process -FilePath $oldExe -ArgumentList "--self-test" `
+    $selfTestRoot = if ($ExpectRollback -and $PortableHandoff) { $portableDir } else { $installDir }
+    $selfTest = Start-Process -FilePath (Join-Path $selfTestRoot "Sandglass.exe") -ArgumentList "--self-test" `
         -PassThru -WindowStyle Hidden
     $null = Wait-ProcessExitBounded $selfTest 45 "Updated executable self-test"
     $selfTest.Refresh()
     if ($selfTest.ExitCode -ne 0) {
         throw "Updated executable self-test returned exit code $($selfTest.ExitCode)."
     }
-    $provenanceValue = Read-Provenance $installDir
+    $provenanceRoot = if ($ExpectRollback -and $PortableHandoff) { $portableDir } else { $installDir }
+    $provenanceValue = Read-Provenance $provenanceRoot
+    if (-not (Test-Path -LiteralPath $customFile -PathType Leaf) -or
+        (Get-Sha256 $customFile) -ne $customFileHash -or
+        -not (Test-Path -LiteralPath $customEmptyDir -PathType Container)) {
+        throw "Update did not preserve owner files in the installation directory."
+    }
     if ($ExpectRollback) {
         if ($provenanceValue.git_head -ne $oldProvenance.git_head -or
             $provenanceValue.build_id -ne $oldProvenance.build_id) {
             throw "Fault-injected update did not restore the old build provenance."
+        }
+        Assert-ShortcutState $shortcutPath $oldShortcutState "Fault-injected update"
+        $actualRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
+        Save-RunValue ([ref]$actualRunValueState)
+        if ($actualRunValueState.Existed -ne $installedRunValueState.Existed -or
+            $actualRunValueState.KeyExisted -ne $installedRunValueState.KeyExisted -or
+            ($actualRunValueState.Existed -and
+             ($actualRunValueState.Kind -ne $installedRunValueState.Kind -or
+              $actualRunValueState.Data -ne $installedRunValueState.Data))) {
+            throw "Fault-injected update did not restore the Sandglass Run value."
+        }
+    } elseif ($PortableHandoff) {
+        $migratedRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
+        Save-RunValue ([ref]$migratedRunValueState)
+        if (-not $migratedRunValueState.Existed -or
+            $migratedRunValueState.Kind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString -or
+            $migratedRunValueState.Data -notlike ('"' + $installDir + '\Sandglass.exe"*')) {
+            throw "Portable-to-installed update did not migrate the REG_EXPAND_SZ Run value to the target."
+        }
+        if ($migratedRunValueState.Data -notlike '*--background --fixture="portable path"') {
+            throw "Portable-to-installed update did not preserve Run arguments."
+        }
+        if ($provenanceValue.git_head -ne $ExpectedGitCommit -or
+            $provenanceValue.git_head -eq $oldProvenance.git_head -or
+            $provenanceValue.build_id -eq $oldProvenance.build_id) {
+            throw "Portable-to-installed update did not activate the expected new build provenance."
         }
     } else {
         if ($provenanceValue.git_head -ne $ExpectedGitCommit) {
@@ -601,6 +834,10 @@ try {
     if ($ExpectRollback) {
         Write-Output ("PASS fault-injected post-activation rollback, old-version restart, " +
             "old provenance restored, residue cleanup, state preservation, provider byte invariance")
+    } elseif ($PortableHandoff) {
+        Write-Output ("PASS portable-to-installed update, visible /UPDATE progress, " +
+            "installed-target restart, provenance, Run migration, source preservation, " +
+            "state preservation, provider byte invariance")
     } else {
         Write-Output ("PASS update protocol, visible /UPDATE progress, parent wait, " +
             "same-directory restart, provenance, rollback cleanup, state preservation, " +
@@ -613,6 +850,10 @@ catch {
 }
 finally {
     try {
+        if ($null -ne $updateReadyEvent) {
+            try { $updateReadyEvent.Dispose() } catch { }
+            $updateReadyEvent = $null
+        }
         if ($null -ne $updateProcess) {
             try {
                 if (-not $updateProcess.HasExited) {
@@ -622,11 +863,46 @@ finally {
             } catch { if ($null -eq $failure) { $failure = $_ } }
         }
         try {
-            foreach ($row in @(Get-ProcessesFromInstall)) {
+            $cleanupPrefixes = @($installDir, $portableDir) | ForEach-Object {
+                (Get-FullPath $_).TrimEnd([IO.Path]::DirectorySeparatorChar) +
+                    [IO.Path]::DirectorySeparatorChar
+            }
+            foreach ($row in @(Get-CimInstance Win32_Process -Filter "Name='Sandglass.exe'" `
+                    -ErrorAction SilentlyContinue | Where-Object {
+                        $candidate = $_.ExecutablePath
+                        $candidate -and @($cleanupPrefixes | Where-Object {
+                            $candidate.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                        }).Count -gt 0
+                    })) {
                 Stop-Process -Id $row.ProcessId -Force -ErrorAction SilentlyContinue
             }
-            $null = Wait-Until { @(Get-ProcessesFromInstall).Count -eq 0 } 20 `
+            $null = Wait-Until {
+                @(Get-CimInstance Win32_Process -Filter "Name='Sandglass.exe'" `
+                    -ErrorAction SilentlyContinue | Where-Object {
+                        $candidate = $_.ExecutablePath
+                        $candidate -and @($cleanupPrefixes | Where-Object {
+                            $candidate.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                        }).Count -gt 0
+                    }).Count -eq 0
+            } 20 `
                 "Temporary Sandglass processes did not stop during smoke cleanup."
+        } catch { if ($null -eq $failure) { $failure = $_ } }
+
+        try {
+            if ($null -ne $originalShortcutState) {
+                $shortcutDirectory = Split-Path -Parent $shortcutPath
+                if ($originalShortcutState.Existed) {
+                    New-Item -ItemType Directory -Force -Path $shortcutDirectory | Out-Null
+                    Copy-Item -LiteralPath $shortcutOriginalPath -Destination $shortcutPath -Force
+                } elseif (Test-Path -LiteralPath $shortcutPath) {
+                    Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction Stop
+                }
+                if (-not $originalShortcutDirectoryExisted) {
+                    # Non-recursive: a concurrently added unrelated file keeps
+                    # the directory in place rather than being deleted.
+                    Remove-Item -LiteralPath $shortcutDirectory -ErrorAction SilentlyContinue
+                }
+            }
         } catch { if ($null -eq $failure) { $failure = $_ } }
 
         try {
@@ -665,7 +941,8 @@ finally {
         # Only these exact paths are owned by this smoke. They are siblings of
         # smokeRoot because NSIS stages updates beneath %TEMP% by parent PID.
         try {
-            foreach ($residue in @($updateStagePath, $updateBackupPath, $updateFailureLog)) {
+            foreach ($residue in @($updateStagePath, $updateBackupPath,
+                                    $updateShortcutBackupPath, $updateFailureLog)) {
                 if ($residue -and (Test-Path -LiteralPath $residue)) {
                     Remove-ExactResidue $residue
                 }

@@ -114,6 +114,12 @@ Copy-Item (Join-Path $root "SUPPORT.md") $bundle -Force
 Copy-Item (Join-Path $licenseStage "THIRD_PARTY_NOTICES.md") $bundle -Force
 Copy-Item (Join-Path $licenseStage "THIRD_PARTY_LICENSES") $bundle -Recurse -Force
 
+# The installer uses this bundle-owned inventory to avoid restoring a product
+# path removed by a later release.  Generate it only after every release-owned
+# top-level path has been copied into the bundle.
+python -m tools.windows_release write-owned-manifest $bundle
+if ($LASTEXITCODE -ne 0) { throw "Product paths manifest generation failed." }
+
 if (-not $SkipRuntimeSmoke) {
     # Sandglass.exe is a GUI-subsystem binary, and PowerShell does not wait for
     # those when they are invoked directly. Measured on this machine: the call
@@ -164,7 +170,7 @@ if ($LASTEXITCODE -ne 0) { throw "Windows checksum generation failed." }
 # there -- which is also what keeps a release a deliberate act.
 $releaseKey = Join-Path $env:USERPROFILE ".sandglass\release-key.txt"
 if (Test-Path -LiteralPath $releaseKey) {
-    & (Join-Path $PSScriptRoot "sign_release_manifest.ps1") -PrivateKey $releaseKey -Manifest $checksums
+    & (Join-Path $PSScriptRoot "sign_release_manifest.ps1") -PrivateKey $releaseKey -Manifest $checksums -Version $version
     Write-Output "Manifest signature: $checksums.sig"
     $keyBackup = ""
     . (Join-Path $PSScriptRoot "release_key_locations.ps1")

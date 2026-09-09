@@ -51,6 +51,8 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn('id="update-dialog-root"', html)
         self.assertIn('class="update-badge-wrap"', script)
         self.assertIn('aria-describedby="update-tooltip"', script)
+        self.assertIn('aria-haspopup="dialog"', script)
+        self.assertIn('aria-expanded=', script)
         self.assertIn('role="tooltip"', script)
         self.assertIn('function updateDialogHtml()', script)
         self.assertIn('role="dialog" aria-modal="true"', script)
@@ -58,6 +60,8 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn('data-act="update-cancel"', script)
         self.assertIn('data-act="apply-update"', script)
         self.assertIn('aria-busy="true"', script)
+        self.assertIn('class="update-dialog-close"', script)
+        self.assertIn('if (state.updateApplying) return;', script)
         self.assertIn('function dialogFocusable()', script)
         self.assertIn('child.inert = updateDialogOpen;', script)
         self.assertIn('child.setAttribute("aria-hidden", "true")', script)
@@ -74,6 +78,145 @@ class WebLocalizationTests(unittest.TestCase):
 
         self.assertIn('body: JSON.stringify({ version: state.update.version })', script)
         self.assertNotIn('body: JSON.stringify({ offer: state.update })', script)
+
+    def test_update_offer_requires_explicit_apply_capability(self):
+        """Exercise the real response normalizer so a standalone offer cannot
+        leave an unusable install badge behind. Keep this behavioral: deleting
+        the capability check must make one of these assertions fail.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+        normalizer = script[script.index("    function normalizeUpdateOffer("):script.index("    async function loadUpdate(")]
+        node_program = (
+            normalizer + "\n" +
+            "process.stdout.write(JSON.stringify([" +
+            "normalizeUpdateOffer({version: '2.0.0', apply_supported: true})," +
+            "normalizeUpdateOffer({version: '2.0.0', apply_supported: false})," +
+            "normalizeUpdateOffer({version: '2.0.0'})," +
+            "normalizeUpdateOffer({apply_supported: true})" +
+            "]));"
+        )
+        completed = subprocess.run(
+            [node, "-e", node_program], capture_output=True, text=True,
+            encoding="utf-8", check=True,
+        )
+        offers = json.loads(completed.stdout)
+        self.assertEqual(offers[0]["version"], "2.0.0")
+        self.assertIsNone(offers[1])
+        self.assertIsNone(offers[2])
+        self.assertIsNone(offers[3])
+
+    def test_update_badge_click_and_busy_close_guard_are_real_state_machine_behaviors(self):
+        """Run the page's actual badge handler and close guard in Node.
+
+        This is intentionally not a source-text assertion: removing the
+        openUpdateDialog() call from the click handler must fail because a
+        badge click no longer opens the dialog.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        html = INDEX.read_text(encoding="utf-8")
+
+        def run_page(page, *, expect_success):
+            script = page.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+            open_fn = script[script.index("    function openUpdateDialog("):
+                                script.index("    async function applyUpdate(")]
+            close_fn = script[script.index("    function closeUpdateDialog("):
+                                 script.index("    async function dismissAnnouncement(")]
+            click_start = script.index(
+                '    document.querySelector(".popover").addEventListener("click", (ev) => {'
+            )
+            click_end = script.index(
+                '    document.addEventListener("click", dismissFloatingMenus);', click_start
+            )
+            click_handler = script[click_start:click_end]
+            node_program = r"""
+const state = {
+  announcementOpen: false,
+  updateDialogOpen: false,
+  updateApplying: false,
+  updateError: "",
+  update: {version: "2.0.0"},
+  appMenu: true,
+  languageOptions: true,
+};
+let badgeHandler;
+function render() {}
+function focusUpdateDialog() {}
+function dismissAnnouncement() {}
+function requestAnimationFrame() {}
+const popover = { addEventListener(kind, callback) { if (kind === "click") badgeHandler = callback; } };
+const document = { querySelector(selector) { return selector === ".popover" ? popover : null; } };
+""" + open_fn + close_fn + click_handler + r"""
+const badge = {
+  getAttribute(name) { return name === "data-act" ? "update-badge" : null; },
+  closest(selector) { return selector === "[data-act]" ? this : null; },
+};
+badgeHandler({target: badge});
+if (!state.updateDialogOpen) throw new Error("badge click did not open update dialog");
+if (state.appMenu || state.languageOptions) throw new Error("badge click did not close menus");
+state.updateApplying = true;
+closeUpdateDialog();
+if (!state.updateDialogOpen) throw new Error("busy update dialog was closed");
+"""
+            completed = subprocess.run(
+                [node, "-e", node_program], capture_output=True, text=True,
+                encoding="utf-8",
+            )
+            if expect_success:
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed
+
+        run_page(html, expect_success=True)
+        mutated = html.replace("        openUpdateDialog();", "        /* badge opener removed */", 1)
+        failed = run_page(mutated, expect_success=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("badge click did not open update dialog", failed.stderr)
+
+    def test_update_failure_responses_preserve_only_the_states_they_can_prove(self):
+        """Run non-2xx update and announcement responses through the real JS."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        html = INDEX.read_text(encoding="utf-8")
+        script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
+        normalizer = script[script.index("    function normalizeUpdateOffer("):
+                              script.index("    async function loadUpdate(")]
+        load_fn = script[script.index("    async function loadUpdate("):
+                           script.index("    async function loadAnnouncement(")]
+        dismiss_fn = script[script.index("    async function dismissAnnouncement("):
+                             script.index("    function openUpdateDialog(")]
+        node_program = r"""
+const state = {
+  update: {version: "old"},
+  announcement: {version: "old"},
+  announcementOpen: true,
+  announcementDismissing: false,
+};
+let renders = 0;
+function render() { renders += 1; }
+function requestAnimationFrame() {}
+let fetch = async (url) => url.includes("announcement/dismiss")
+  ? ({ok: true, json: async () => ({ok: false, dismissed: false})})
+  : ({ok: false});
+""" + normalizer + load_fn + dismiss_fn + r"""
+(async () => {
+  await loadUpdate();
+  if (state.update !== null) throw new Error("failed update check kept stale offer");
+  await dismissAnnouncement();
+  if (!state.announcementOpen) throw new Error("failed announcement dismissal closed dialog");
+  if (state.announcementDismissing) throw new Error("failed dismissal stayed busy");
+})().catch((error) => { console.error(error.message); process.exit(1); });
+"""
+        completed = subprocess.run(
+            [node, "-e", node_program], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_announcement_notes_are_escaped_by_the_real_browser_function(self):
         """Run the page's pure notes renderer in Node without adding a DOM dependency."""
@@ -108,6 +251,8 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn('updatePoll = setInterval(() => {', script)
         self.assertIn('if (!state.updateApplying && !state.updateDialogOpen && !state.announcementOpen) loadUpdate(true);', script)
         self.assertIn('force ? "/api/update?force=1" : "/api/update"', script)
+        self.assertIn('state.update = normalizeUpdateOffer(offer);', script)
+        self.assertIn('offer.apply_supported === true', script)
         self.assertIn('loadUpdate();\n    loadAnnouncement();\n    startUpdatePoll();', script)
         self.assertEqual(script.count('fetch("/api/update/apply"'), 1)
 
@@ -138,7 +283,7 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn('<circle cx="8" cy="8" r="6"/>', html)
         self.assertNotIn('data-act="help-open" role="menuitem"><span class="logo sandglass"', html)
         self.assertIn('class="app-menu-options" role="group"', html)
-        self.assertIn('aria-haspopup="true" aria-expanded="${state.languageOptions ? "true" : "false"}"', html)
+        self.assertIn('aria-haspopup="menu" aria-expanded="${state.languageOptions ? "true" : "false"}"', html)
         self.assertIn('kind === "language-toggle"', script)
         self.assertIn('state.languageOptions = false;', script)
         self.assertIn('ev.__sandglassAppMenuAction = true;', script)

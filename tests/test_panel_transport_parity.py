@@ -80,6 +80,50 @@ class _Receiver:
 
 
 class PanelTransportParityTests(unittest.TestCase):
+    def test_update_capability_identifies_standalone_and_desktop_transports(self):
+        from sandglass import desktop
+
+        with patch("sandglass.update.available_update",
+                   return_value={"version": "9.9.9"}):
+            standalone = serve.api_payload("/api/update", live_quota=False)
+            native = desktop._desktop_api(_Receiver(), "GET", "/api/update")
+        self.assertFalse(standalone["apply_supported"])
+        self.assertTrue(native["apply_supported"])
+
+    def test_http_fallback_advertises_apply_and_standalone_http_rejects_apply(self):
+        """Exercise both HTTP modes, including the unsupported POST contract."""
+        def start(update_apply=None):
+            handler = partial(
+                serve.Handler, since=None, live_quota=False, allow_otlp=False,
+                update_apply=update_apply,
+            )
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 5)
+            self.addCleanup(httpd.server_close)
+            self.addCleanup(httpd.shutdown)
+            return httpd
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"SANDGLASS_HOME": tmp}
+        ), patch("sandglass.update.available_update",
+                 return_value={"version": "9.9.9"}):
+            fallback = start(update_apply=lambda body: {"ok": True})
+            payload = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{fallback.server_port}/api/update", timeout=10
+            ).read())
+            self.assertTrue(payload["apply_supported"])
+
+            standalone = start()
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{standalone.server_port}/api/update/apply",
+                method="POST", data=b"{}", headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=10)
+            self.assertEqual(raised.exception.code, 404)
+
     def test_the_page_posts_to_something(self):
         """A guard on the guard: an empty set would make the rest vacuous."""
         self.assertTrue(posted_endpoints(), "没有从页面里解析到任何 POST 端点")

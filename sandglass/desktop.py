@@ -21,6 +21,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import sys
 import threading
 from ctypes import wintypes
@@ -472,12 +473,24 @@ def apply_update_request(shell, body: str) -> dict:
     try:
         result = apply_update(offer)
     except Exception as exc:  # noqa: BLE001 - the reason belongs on screen
+        from sandglass.update import UpdateBusyError
+
+        if isinstance(exc, UpdateBusyError):
+            return {"ok": False, "error": "update_busy"}
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
     if not isinstance(result, dict) or result.get("ok") is not True:
         return result if isinstance(result, dict) else {"ok": False, "error": "apply_failed"}
-    if shell is not None:
-        shell.quit()
-    return result
+    if shell is not None and shell.quit() is not True:
+        from sandglass.update import cancel_update_handoff
+
+        cancelled = cancel_update_handoff(result)
+        return {
+            "ok": False,
+            "error": "desktop_quit_failed" if cancelled else "update_cancel_failed",
+        }
+    from sandglass.update import public_update_result
+
+    return public_update_result(result)
 
 
 def _desktop_api(receiver: TelemetryReceiver, method: str,
@@ -488,6 +501,7 @@ def _desktop_api(receiver: TelemetryReceiver, method: str,
             target,
             live_quota=False,
             telemetry_receiver=receiver.status(),
+            apply_supported=True,
         )
     if method == "POST" and parsed.path == "/api/update/apply":
         return apply_update_request(shell, body)
@@ -553,6 +567,76 @@ def _panel_usable_height(hwnd: int | None, orb: Orb | None) -> int:
 
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "sandglass"
+UPDATE_READY_ARG = "/UPDATE_TOKEN="
+_UPDATE_READY_TOKEN_RE = re.compile(r"[0-9a-f]{32}")
+_UPDATE_READY_LOCK = threading.Lock()
+_UPDATE_READY_SENT = False
+
+
+def _update_ready_token() -> str | None:
+    """Return only the strict, installer-created named-event token."""
+    prefix = UPDATE_READY_ARG.casefold()
+    for argument in sys.argv[1:]:
+        if not isinstance(argument, str) or not argument.casefold().startswith(prefix):
+            continue
+        value = argument[len(UPDATE_READY_ARG):].strip()
+        if not _UPDATE_READY_TOKEN_RE.fullmatch(value):
+            return None
+        return value
+    return None
+
+
+def _signal_update_ready() -> None:
+    """Signal the one-shot named event after the real panel is usable.
+
+    The event is created by the installer.  This process only opens that
+    exact event and sets it; it never treats a command-line value as a path.
+    """
+    global _UPDATE_READY_SENT
+    with _UPDATE_READY_LOCK:
+        if _UPDATE_READY_SENT:
+            return
+        token = _update_ready_token()
+        if token is None or os.name != "nt":
+            return
+        name = f"Local\\Sandglass.UpdateReady.{token}"
+        handle = None
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+            kernel32.OpenEventW.restype = wintypes.HANDLE
+            kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+            kernel32.SetEvent.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenEventW(0x0002, False, name)  # EVENT_MODIFY_STATE
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not kernel32.SetEvent(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except (OSError, AttributeError) as exc:
+            # The update installer will time out and roll back.  Startup itself
+            # must not fail merely because an optional handoff observer vanished.
+            print(f"could not signal update readiness: {exc}", file=sys.stderr)
+        else:
+            _UPDATE_READY_SENT = True
+        finally:
+            if handle:
+                kernel32.CloseHandle(handle)
+
+
+def _signal_update_ready_if_window_visible(hwnd: int) -> bool:
+    """Signal only after Windows confirms the fallback panel is visible."""
+    if not hwnd:
+        return False
+    try:
+        visible = bool(ctypes.windll.user32.IsWindowVisible(hwnd))
+    except (AttributeError, OSError):
+        return False
+    if not visible:
+        return False
+    _signal_update_ready()
+    return True
 
 
 def _launcher_command(*, background: bool = False) -> str:
@@ -965,6 +1049,10 @@ class Shell:
             # Re-show after a hide_to_tray that ran between post_show and _show.
             self.orb.post_show()
 
+    def native_ready(self) -> None:
+        """Report native readiness after the actual open transition completes."""
+        _signal_update_ready()
+
     def native_minimized(self) -> None:
         self._panel_open = False
         self._in_tray = False
@@ -1204,6 +1292,14 @@ class Shell:
                 return
             clear_component_failure("fallback_panel_show")
             hwnd = self._panel_hwnd()
+            if not hwnd or (os.name == "nt" and not ctypes.windll.user32.IsWindowVisible(hwnd)):
+                record_component_failure(
+                    "fallback_panel_show",
+                    RuntimeError("fallback panel did not provide a visible HWND"),
+                )
+                if hwnd:
+                    clear_window_region(hwnd)
+                return
             if hwnd and self.mark is not None:
                 set_window_icon(hwnd, self.mark)
             self.panel_dock.start()
@@ -1218,6 +1314,10 @@ class Shell:
                 if orb_visible and orb_rect:
                     animate_window_reveal(hwnd, orb_rect, opening=True)
             self._panel_open = True
+            # pywebview's loaded event has already fired before this method is
+            # called. The OS-visible HWND, rather than show() returning, is the
+            # direct proof the installer needs before retiring its rollback.
+            _signal_update_ready_if_window_visible(hwnd)
 
     def _raise_panel(self) -> None:
         """Bring an already-open panel forward. Tray click is not a toggle.
@@ -1336,22 +1436,26 @@ class Shell:
             self._in_tray = False
         self.orb.post_show()
 
-    def quit(self) -> None:
+    def quit(self) -> bool:
         if self._quitting:
-            return
+            return True
         self._quitting = True
         self._flush_panel_position()
         if self.orb:
             _save_state(**dict(zip(("orb_x", "orb_y"), self._orb_pos())))
         if self.native_panel:
-            self.native_panel.quit()
+            if self.native_panel.quit() is not True:
+                self._quitting = False
+                return False
             self._done.set()
-            return
+            return True
         if self.panel:
             try:
                 self.panel.destroy()
             except Exception:
                 self._quitting = False
+                return False
+        return True
 
     def stop_monitoring(self) -> None:
         from sandglass.observer import request_observer_stop, stop_supervising_observer
@@ -1559,6 +1663,7 @@ def main() -> int:
             window_icon=WEB_DIR / "assets" / "orb.ico",
             on_minimized=shell.native_minimized,
             on_opened=shell.native_opened,
+            on_ready=shell.native_ready,
             on_closed=shell.native_closed,
             on_locale=shell.set_locale,
             on_dock=shell.native_panel_docked,

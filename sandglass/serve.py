@@ -152,8 +152,9 @@ def _note_answer(kind: str, payload: object) -> object:
 
 
 def api_payload(target: str, *, since: str | None = None,
-                live_quota: bool = True,
-                telemetry_receiver: dict[str, object] | None = None) -> object:
+                 live_quota: bool = True,
+                 telemetry_receiver: dict[str, object] | None = None,
+                 apply_supported: bool = False) -> object:
     """Return one dashboard API payload without requiring an HTTP transport."""
     parsed = urlparse(target)
     if parsed.path == "/api/report":
@@ -231,7 +232,13 @@ def api_payload(target: str, *, since: str | None = None,
     if parsed.path == "/api/update":
         from sandglass.update import available_update
 
-        return available_update(force="force" in parse_qs(parsed.query))
+        offer = available_update(force="force" in parse_qs(parsed.query))
+        # Keep capability separate from the offer.  A standalone ``serve``
+        # process can display updates but has no desktop shell to quit before
+        # the installer replaces files, so it must never expose apply.
+        payload = dict(offer) if isinstance(offer, dict) else {}
+        payload["apply_supported"] = bool(apply_supported)
+        return payload
     if parsed.path == "/api/update/announcement":
         from sandglass.update import update_announcement
 
@@ -706,6 +713,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.path, since=self._since, live_quota=self._live_quota,
                 telemetry_receiver=(self._telemetry_receiver()
                                     if self._telemetry_receiver else None),
+                apply_supported=self._update_apply is not None,
             )
         except ValueError as exc:
             self.send_error(400, str(exc))

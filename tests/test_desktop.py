@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import unittest
 import urllib.error
@@ -27,6 +28,9 @@ from sandglass.desktop import (
     _panel_usable_height,
     _record_fallback_runtime_identity,
     _save_state,
+    _signal_update_ready,
+    _signal_update_ready_if_window_visible,
+    _update_ready_token,
     _set_app_user_model_id,
     _tray,
     _wait_for_orb,
@@ -35,6 +39,83 @@ from sandglass.desktop import (
 )
 from sandglass.orb import WM_ORB_ACTIVATE, activate_existing_orb, animate_window_reveal
 from sandglass.paths import StateHomeAttestationError
+
+
+class UpdateReadySignalTests(unittest.TestCase):
+    def setUp(self):
+        import sandglass.desktop as desktop
+        desktop._UPDATE_READY_SENT = False
+
+    def test_signal_sets_only_the_installer_named_event(self):
+        class Fn:
+            def __init__(self, result):
+                self.result = result
+                self.calls = []
+            def __call__(self, *args):
+                self.calls.append(args)
+                return self.result
+
+        class Kernel:
+            def __init__(self):
+                self.opened = []
+                self.OpenEventW = Fn(123)
+                self.SetEvent = Fn(1)
+                self.CloseHandle = Fn(1)
+
+        kernel = Kernel()
+        class Open(Fn):
+            def __call__(self, *args):
+                kernel.opened.append(args)
+                return self.result
+        kernel.OpenEventW = Open(123)
+        with patch.object(sys, "argv", ["Sandglass.exe", "/UPDATE_TOKEN=0123456789abcdef0123456789abcdef"]), \
+                patch("sandglass.desktop.ctypes.WinDLL", return_value=kernel):
+            self.assertEqual(_update_ready_token(), "0123456789abcdef0123456789abcdef")
+            _signal_update_ready()
+        self.assertEqual(kernel.opened[0][2], "Local\\Sandglass.UpdateReady.0123456789abcdef0123456789abcdef")
+        self.assertEqual(len(kernel.SetEvent.calls), 1)
+        self.assertEqual(len(kernel.CloseHandle.calls), 1)
+
+    def test_ready_signal_is_one_shot_within_the_new_desktop_process(self):
+        class Fn:
+            def __init__(self, result):
+                self.result, self.calls = result, []
+            def __call__(self, *args):
+                self.calls.append(args)
+                return self.result
+
+        kernel = type("Kernel", (), {})()
+        kernel.OpenEventW = Fn(123)
+        kernel.SetEvent = Fn(1)
+        kernel.CloseHandle = Fn(1)
+        with patch.object(
+            sys, "argv",
+            ["Sandglass.exe", "/UPDATE_TOKEN=0123456789abcdef0123456789abcdef"],
+        ), patch("sandglass.desktop.ctypes.WinDLL", return_value=kernel):
+            _signal_update_ready()
+            _signal_update_ready()
+        self.assertEqual(len(kernel.OpenEventW.calls), 1)
+        self.assertEqual(len(kernel.SetEvent.calls), 1)
+
+    def test_malformed_token_is_a_noop_and_cannot_name_a_path(self):
+        with patch.object(sys, "argv", ["Sandglass.exe", "/UPDATE_TOKEN=C:\\sensitive\\file"]), \
+                patch("sandglass.desktop.ctypes.WinDLL") as win_dll:
+            self.assertIsNone(_update_ready_token())
+            _signal_update_ready()
+        win_dll.assert_not_called()
+
+    def test_without_update_argument_signal_is_a_noop(self):
+        with patch.object(sys, "argv", ["Sandglass.exe"]), \
+                patch("sandglass.desktop.ctypes.WinDLL") as win_dll:
+            _signal_update_ready()
+        win_dll.assert_not_called()
+
+    @patch("sandglass.desktop._signal_update_ready")
+    @patch("sandglass.desktop.ctypes.windll.user32.IsWindowVisible", return_value=0)
+    def test_fallback_does_not_signal_before_windows_reports_visible(
+            self, _visible, signal):
+        self.assertFalse(_signal_update_ready_if_window_visible(101))
+        signal.assert_not_called()
 
 
 class _Panel:
@@ -204,6 +285,7 @@ class UpdateApplyRequestTests(unittest.TestCase):
 
     def test_success_uses_revalidated_offer_and_quits_once(self):
         shell = Mock()
+        shell.quit.return_value = True
         authoritative = {
             "version": "9.9.9",
             "asset": "Sandglass-9.9.9-windows-x64-setup.exe",
@@ -231,13 +313,53 @@ class UpdateApplyRequestTests(unittest.TestCase):
         shell.quit.assert_called_once_with()
         self.assertEqual(result["version"], "9.9.9")
 
+    def test_failed_desktop_shutdown_cancels_waiting_installer_and_reports_failure(self):
+        shell = Mock()
+        shell.quit.return_value = False
+        authoritative = {"version": "9.9.9"}
+        internal = {
+            "ok": True, "version": "9.9.9", "_process": object(),
+            "_pending_record": {"version": "9.9.9"},
+        }
+        with patch("sandglass.update.available_update",
+                   return_value=authoritative), \
+                patch("sandglass.update.apply_update", return_value=internal), \
+                patch("sandglass.update.cancel_update_handoff",
+                      return_value=True) as cancel:
+            result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
+
+        shell.quit.assert_called_once_with()
+        cancel.assert_called_once_with(internal)
+        self.assertEqual(result, {"ok": False, "error": "desktop_quit_failed"})
+
 
 class DesktopWindowControlTests(unittest.TestCase):
     def setUp(self):
         self.shell = Shell("http://127.0.0.1:7740/")
         self.shell.panel = _Panel()
+        self.shell.panel.native = type("Native", (), {
+            "Handle": type("Handle", (), {"ToInt64": lambda self: 101})(),
+        })()
         self.shell.orb = _Orb()
         self.api = PanelApi(self.shell)
+        self._visible_patch = patch(
+            "sandglass.desktop.ctypes.windll.user32.IsWindowVisible",
+            return_value=1,
+        )
+        self._visible_patch.start()
+        self.addCleanup(self._visible_patch.stop)
+
+    @patch("sandglass.desktop._signal_update_ready")
+    def test_native_ready_signal_is_emitted_only_from_ready_callback(self, signal):
+        self.shell.native_ready()
+        signal.assert_called_once_with()
+
+    @patch("sandglass.desktop._signal_update_ready_if_window_visible")
+    @patch("sandglass.desktop._save_state")
+    def test_fallback_ready_signal_follows_a_successful_visible_show(self, _save, signal):
+        signal.side_effect = lambda hwnd: self.assertEqual(self.shell.panel.shown, 1) or True
+        self.shell.show_panel()
+        signal.assert_called_once_with(101)
 
     @patch("sandglass.desktop.clamp_to_screen", side_effect=lambda x, y, side: (x, y))
     @patch("sandglass.desktop.monitor_scale", return_value=1.0)
@@ -854,6 +976,15 @@ class DesktopWindowControlTests(unittest.TestCase):
 
         self.assertEqual(self.shell.orb.quit, 1)
         self.assertEqual(icon.stopped, 1)
+
+    @patch("sandglass.desktop._save_state")
+    def test_quit_reports_destroy_failure_instead_of_claiming_handoff(self, _save):
+        self.shell.panel.destroy = Mock(side_effect=RuntimeError("destroy failed"))
+
+        self.assertFalse(self.shell.quit())
+
+        self.assertFalse(self.shell._quitting)
+        self.shell.panel.destroy.assert_called_once_with()
 
     def test_a_failed_show_does_not_turn_the_orb_into_a_dead_switch(self):
         """One failure must not cost the rest of the session.

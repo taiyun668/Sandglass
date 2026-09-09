@@ -37,6 +37,11 @@ Var UpdateParentPid
 Var UpdateBackup
 Var UpdateStage
 Var UpdateRestartExe
+Var UpdateReadySignal
+Var UpdateReadyEventName
+Var UpdateReadyHandle
+Var UpdateChildHandle
+Var UpdateChildStopOk
 Var UpdateSourceExe
 Var UpdateHasInstalled
 Var UpdateBackupCreated
@@ -59,6 +64,18 @@ Var UpdateOldNoModify
 Var UpdateOldNoModifyPresent
 Var UpdateOldNoRepair
 Var UpdateOldNoRepairPresent
+Var UpdateOldRunValue
+Var UpdateOldRunPresent
+Var UpdateOldRunType
+Var UpdateRunChanged
+Var UpdateShortcutBackup
+Var UpdateShortcutCaptured
+Var UpdateShortcutExisted
+Var UpdateShortcutChanged
+Var UpdateShortcutDirectoryExisted
+Var UpdatePreserveSource
+Var UpdatePreserveTarget
+Var UpdatePreserveOk
 
 Name "Sandglass"
 OutFile "${ARTIFACTDIR}\${ARTIFACTNAME}.exe"
@@ -110,6 +127,8 @@ Function .onInit
   ${GetOptions} "$R9" "/PARENTPID=" $UpdateParentPid
   ClearErrors
   ${GetOptions} "$R9" "/RESTARTEXE=" $UpdateRestartExe
+  ClearErrors
+  ${GetOptions} "$R9" "/UPDATE_TOKEN=" $UpdateReadySignal
   ${If} $UpdateMode == 1
     ; Canonicalize the PID before it becomes part of the staging path. Besides
     ; rejecting a broken protocol, this prevents command-line path injection
@@ -125,6 +144,33 @@ Function .onInit
       SetErrorLevel 22
       Abort
     ${EndIf}
+    Push $UpdateReadySignal
+    Call IsValidUpdateToken
+    Pop $R8
+    ${If} $R8 != 1
+      ; A self-test only proves that Python can load.  The update must also
+      ; receive a direct signal from the real desktop window before removing
+      ; the rollback copy.
+      SetErrorLevel 23
+      Abort
+    ${EndIf}
+    StrCpy $UpdateReadyEventName "Local\Sandglass.UpdateReady.$UpdateReadySignal"
+    ClearErrors
+    ; Manual reset lets an independent smoke observer see the same readiness
+    ; without consuming it before the installer wait. The event is still
+    ; per-attempt: a random token names it, and any pre-existing name is refused.
+    System::Call 'kernel32::CreateEventW(p 0, i 1, i 0, w "$UpdateReadyEventName") p .r0 ? e'
+    Pop $R8
+    ${If} $0 == 0
+      SetErrorLevel 24
+      Abort
+    ${EndIf}
+    ${If} $R8 == 183
+      System::Call 'kernel32::CloseHandle(p r0)'
+      SetErrorLevel 25
+      Abort
+    ${EndIf}
+    StrCpy $UpdateReadyHandle $0
     StrCpy $UpdateParentPid $R7
     StrCpy $UpdateFailureLog "$TEMP\Sandglass-update-$UpdateParentPid.failure.txt"
     Delete "$UpdateFailureLog"
@@ -137,6 +183,51 @@ Function .onInit
     ${EndIf}
     Abort
   ${EndIf}
+FunctionEnd
+
+; Validate the update capability before it is used to name a kernel object.
+; Only lower-case hexadecimal is accepted, so a malformed argument can never
+; become a path, registry key, or an ambiguous event name.
+Function IsValidUpdateToken
+  Exch $R0
+  StrCpy $R3 $R0
+  StrLen $R1 $R3
+  ${If} $R1 != 32
+    StrCpy $R2 0
+    Goto update_token_done
+  ${EndIf}
+  StrCpy $R1 0
+  StrCpy $R2 1
+  update_token_loop:
+    StrCpy $R0 $R3 1 $R1
+    ${If} $R0 == "0"
+    ${OrIf} $R0 == "1"
+    ${OrIf} $R0 == "2"
+    ${OrIf} $R0 == "3"
+    ${OrIf} $R0 == "4"
+    ${OrIf} $R0 == "5"
+    ${OrIf} $R0 == "6"
+    ${OrIf} $R0 == "7"
+    ${OrIf} $R0 == "8"
+    ${OrIf} $R0 == "9"
+    ${OrIf} $R0 == "a"
+    ${OrIf} $R0 == "b"
+    ${OrIf} $R0 == "c"
+    ${OrIf} $R0 == "d"
+    ${OrIf} $R0 == "e"
+    ${OrIf} $R0 == "f"
+    ${Else}
+      StrCpy $R2 0
+      Goto update_token_done
+    ${EndIf}
+    IntOp $R1 $R1 + 1
+    ${If} $R1 < 32
+      Goto update_token_loop
+    ${EndIf}
+  update_token_done:
+  Exch $R2
+  Pop $R1
+  Push $R1
 FunctionEnd
 
 Function UpdateSkipPage
@@ -184,10 +275,113 @@ Function WaitForUpdateParent
     StrCpy $UpdatePhase "open-parent"
     Call UpdateFailure
   ${EndIf}
-  System::Call 'kernel32::WaitForSingleObject(p r0, i 0xFFFFFFFF) i .r1'
+  ; A window that failed to begin shutting down must not leave a visible,
+  ; non-cancellable installer waiting forever. No product path has been
+  ; touched yet, so timeout is a clean handoff failure.
+  System::Call 'kernel32::WaitForSingleObject(p r0, i 30000) i .r1'
   System::Call 'kernel32::CloseHandle(p r0)'
-  ${If} $1 != 0
+  ${If} $1 == 258
+    StrCpy $UpdatePhase "parent-exit-timeout"
+    Call UpdateFailure
+  ${ElseIf} $1 != 0
     StrCpy $UpdatePhase "wait-parent"
+    Call UpdateFailure
+  ${EndIf}
+FunctionEnd
+
+; Launch the new desktop with CreateProcessW so the installer owns the exact
+; child handle. Waiting on a PID or on a signal file can confuse an early
+; child exit with readiness and can race another process reusing the PID.
+Function LaunchUpdateDesktop
+  StrCpy $R0 '"$INSTDIR\Sandglass.exe" "/UPDATE_TOKEN=$UpdateReadySignal"'
+  ; Allocate fully initialized STARTUPINFOW and PROCESS_INFORMATION structs.
+  ; System::Alloc alone does not promise zeroed bytes; CreateProcess reads the
+  ; reserved fields, so every field is explicit here.
+  System::Call "*(i 68, p 0, p 0, p 0, i 0, i 0, i 0, i 0, i 0, i 0, i 0, i 0, &i2 0, &i2 0, p 0, p 0, p 0, p 0) p .R1"
+  System::Call "*(p 0, p 0, i 0, i 0) p .R2"
+  ClearErrors
+  System::Call 'kernel32::CreateProcessW(p 0, t R0, p 0, p 0, i 0, i 0x04000000, p 0, p 0, p R1, p R2) i .r3 ? e'
+  Pop $R4
+  System::Free $R1
+  ${If} $R3 == 0
+    System::Free $R2
+    SetErrors
+    Return
+  ${EndIf}
+  System::Call "*$R2(p .r0, p .r1, i .r5, i .r6)"
+  System::Call 'kernel32::CloseHandle(p r1)'
+  System::Free $R2
+  StrCpy $UpdateChildHandle $0
+FunctionEnd
+
+Function StopFailedUpdateChild
+  ; If the new process is still alive, terminate and wait on this exact handle
+  ; before touching the activated tree. Then ask its observer to stop and prove
+  ; that the shared mutex is free; otherwise rollback would race a file lock.
+  StrCpy $UpdateChildStopOk 1
+  ${If} $UpdateChildHandle != ""
+    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .r0'
+    ${If} $R0 == 258
+      System::Call 'kernel32::TerminateProcess(p $UpdateChildHandle, i 20) i .r1'
+      System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 15000) i .r0'
+      ${If} $R0 != 0
+        StrCpy $UpdateChildStopOk 0
+      ${EndIf}
+    ${ElseIf} $R0 != 0
+      ; WAIT_FAILED or any unexpected result is not proof of process exit.
+      StrCpy $UpdateChildStopOk 0
+    ${EndIf}
+    System::Call 'kernel32::CloseHandle(p $UpdateChildHandle)'
+    StrCpy $UpdateChildHandle ""
+  ${EndIf}
+  ${If} $UpdateActivated == 1
+    ; This request is best effort. The observer mutex below is the authority:
+    ; a SAC-blocked executable cannot run --stop, but also cannot own it.
+    ClearErrors
+    ExecWait '"$INSTDIR\Sandglass.exe" --stop' $0
+    StrCpy $R7 60
+    update_mutex_wait:
+      Call CheckSandglassMutex
+      Pop $R6
+      ${If} $R6 == "free"
+        Return
+      ${EndIf}
+      Sleep 250
+      IntOp $R7 $R7 - 1
+      ${If} $R7 > 0
+        Goto update_mutex_wait
+      ${EndIf}
+      StrCpy $UpdateChildStopOk 0
+      StrCpy $UpdatePhase "$UpdatePhase-mutex"
+  ${EndIf}
+FunctionEnd
+
+Function WaitForUpdateReady
+  ; WaitForMultipleObjects distinguishes the one-shot UI event from an early
+  ; process exit and from a timeout. The event is installer-created and named
+  ; by a random per-attempt token, so readiness is never inferred from a file.
+  System::Call "*(p $UpdateReadyHandle, p $UpdateChildHandle) p .R0"
+  System::Call 'kernel32::WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1'
+  System::Free $R0
+  ${If} $R1 == 0
+    ; If the event and child became signaled together, the lower array index
+    ; wins. Require the exact desktop process to still be alive at readiness.
+    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .r2'
+    ${If} $R2 == 258
+      System::Call 'kernel32::CloseHandle(p $UpdateChildHandle)'
+      StrCpy $UpdateChildHandle ""
+      Return
+    ${EndIf}
+    StrCpy $UpdatePhase "ready-child-exit"
+    Call UpdateFailure
+  ${ElseIf} $R1 == 1
+    StrCpy $UpdatePhase "ready-child-exit"
+    Call UpdateFailure
+  ${ElseIf} $R1 == 258
+    StrCpy $UpdatePhase "ready-timeout"
+    Call UpdateFailure
+  ${Else}
+    StrCpy $UpdatePhase "ready-wait"
     Call UpdateFailure
   ${EndIf}
 FunctionEnd
@@ -197,14 +391,41 @@ Function UpdateFailure
   ; complete old directory when it was moved aside, then start that old copy.
   ${If} $UpdateMode == 1
     SetOutPath "$TEMP"
+    Call StopFailedUpdateChild
+    ${If} $UpdateChildStopOk != 1
+      FileOpen $4 "$UpdateFailureLog" w
+      FileWrite $4 "$UpdatePhase$\r$\n"
+      FileClose $4
+      SetErrorLevel 27
+      Quit
+    ${EndIf}
+    ${If} $UpdateReadyHandle != ""
+      System::Call 'kernel32::CloseHandle(p $UpdateReadyHandle)'
+      StrCpy $UpdateReadyHandle ""
+    ${EndIf}
     FileOpen $4 "$UpdateFailureLog" w
     FileWrite $4 "$UpdatePhase$\r$\n"
     FileClose $4
-    ; A post-activation failure may already have created the installed-channel
-    ; shortcut. Remove only that product-owned link before restoring the old
-    ; installed tree or returning to the portable source.
-    Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
-    RMDir "$SMPROGRAMS\Sandglass"
+    ; Only undo a shortcut this update actually captured and changed. An early
+    ; failure, a portable source, or an unrelated shortcut must remain intact.
+    ${If} $UpdateShortcutCaptured == 1
+      ${If} $UpdateShortcutChanged == 1
+        Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
+      ${EndIf}
+      ${If} $UpdateShortcutExisted == 1
+        ${If} ${FileExists} "$UpdateShortcutBackup"
+          ClearErrors
+          Rename "$UpdateShortcutBackup" "$SMPROGRAMS\Sandglass\Sandglass.lnk"
+          ${If} ${Errors}
+            StrCpy $UpdatePhase "$UpdatePhase-rollback-shortcut"
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+      ${If} $UpdateShortcutDirectoryExisted != 1
+        ; Non-recursive: preserve it if anything unrelated appeared meanwhile.
+        RMDir "$SMPROGRAMS\Sandglass"
+      ${EndIf}
+    ${EndIf}
     ${If} $UpdateStage != ""
       RMDir /r "$UpdateStage"
     ${EndIf}
@@ -213,6 +434,7 @@ Function UpdateFailure
     ; existing directory and would otherwise leave the broken new runtime in
     ; place while reporting that rollback happened.
     ${If} $UpdateActivated == 1
+      ${If} $UpdatePreserveOk == 1
       StrCpy $UpdateNewRemoved 0
       ClearErrors
       RMDir /r "$INSTDIR"
@@ -223,6 +445,7 @@ Function UpdateFailure
         StrCpy $UpdatePhase "$UpdatePhase-rollback-remove-new"
       ${Else}
         StrCpy $UpdateNewRemoved 1
+      ${EndIf}
       ${EndIf}
     ${EndIf}
     ${If} $UpdateBackupCreated == 1
@@ -359,6 +582,94 @@ Function RestoreUpdateRegistry
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoRepair"
   ${EndIf}
   DeleteRegKey /ifempty HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"
+  ; Run is an explicit user opt-in. Restore only our own value, and only when
+  ; this update wrote it; unrelated startup entries are never enumerated or
+  ; deleted. Type 2 is REG_EXPAND_SZ, preserved from the snapshot.
+  ${If} $UpdateRunChanged == 1
+    ${If} $UpdateOldRunPresent == 1
+      ${If} $UpdateOldRunType == 2
+        WriteRegExpandStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass" "$UpdateOldRunValue"
+      ${Else}
+        WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass" "$UpdateOldRunValue"
+      ${EndIf}
+    ${Else}
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass"
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+; Capture the user's opt-in startup value. ReadRegStr gives us the command;
+; the .NET registry API supplies the numeric value kind without depending on
+; reg.exe's localized display text, so REG_EXPAND_SZ is not silently converted
+; to REG_SZ during a portable-to-installed migration.
+Function SnapshotUpdateRun
+  StrCpy $UpdateOldRunPresent 0
+  StrCpy $UpdateOldRunType 0
+  StrCpy $UpdateRunChanged 0
+  ClearErrors
+  ReadRegStr $UpdateOldRunValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldRunPresent 1
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command "$$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($\"Software\\Microsoft\\Windows\\CurrentVersion\\Run$\",$$false); if ($$null -eq $$k) { exit 2 }; [Console]::Write([int]$$k.GetValueKind($\"sandglass$\")); $$k.Dispose()"'
+    Pop $0
+    Pop $1
+    ${If} $0 == 0
+      StrCpy $2 $1 1
+      ${If} $2 == 1
+        StrCpy $UpdateOldRunType 1
+      ${ElseIf} $2 == 2
+        StrCpy $UpdateOldRunType 2
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+; Move an existing link aside only at the point where this update is about to
+; replace it. The old bytes can then be restored byte-for-byte on rollback.
+Function SnapshotUpdateShortcut
+  StrCpy $UpdateShortcutCaptured 0
+  StrCpy $UpdateShortcutExisted 0
+  StrCpy $UpdateShortcutChanged 0
+  StrCpy $UpdateShortcutDirectoryExisted 0
+  IfFileExists "$SMPROGRAMS\Sandglass\." 0 +2
+    StrCpy $UpdateShortcutDirectoryExisted 1
+  StrCpy $UpdateShortcutBackup "$TEMP\Sandglass-update-$UpdateParentPid-shortcut.lnk"
+  ; A pre-existing path is not ours to delete. Treat it like a staging
+  ; collision and fail before touching the user's Start Menu link.
+  ${If} ${FileExists} "$UpdateShortcutBackup"
+    Return
+  ${EndIf}
+  ${If} ${FileExists} "$SMPROGRAMS\Sandglass\Sandglass.lnk"
+    ClearErrors
+    Rename "$SMPROGRAMS\Sandglass\Sandglass.lnk" "$UpdateShortcutBackup"
+    ${If} ${Errors}
+      Return
+    ${EndIf}
+    StrCpy $UpdateShortcutExisted 1
+  ${EndIf}
+  StrCpy $UpdateShortcutCaptured 1
+FunctionEnd
+
+; Preserve files that belong to the owner of the install directory. The helper
+; is a checked-in, directly tested input to this installer; generating it with
+; FileWrite previously let the NSIS compile pass while the emitted PowerShell
+; had a syntax error. It runs before activation, so any refusal leaves the old
+; installation untouched.
+Function PreserveUpdateExtras
+  StrCpy $UpdatePreserveOk 0
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  ClearErrors
+  File /oname=preserve_update_extras.ps1 "..\tools\preserve_update_extras.ps1"
+  ${If} ${Errors}
+    Return
+  ${EndIf}
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\preserve_update_extras.ps1" -Old "$UpdatePreserveSource" -New "$UpdatePreserveTarget"'
+  Pop $0
+  Pop $1
+  ${If} $0 == 0
+    StrCpy $UpdatePreserveOk 1
+  ${EndIf}
 FunctionEnd
 
 ; Push "free", "held" or "unknown" for the observer's single-instance mutex.
@@ -423,14 +734,22 @@ Section "Sandglass" SecMain
       StrCpy $INSTDIR "$LOCALAPPDATA\Programs\Sandglass"
 !endif
     ${EndIf}
-    ${If} $UpdateSourceExe == ""
+  ${If} $UpdateSourceExe == ""
       ; Do not inspect the portable source directory. The updater supplied the
       ; exact executable that launched it and that is the only source path we
       ; need to invoke for the observer handoff.
       StrCpy $UpdateSourceExe "$UpdateRestartExe"
       Call SnapshotUpdateRegistry
+      Call SnapshotUpdateRun
     ${Else}
       Call SnapshotUpdateRegistry
+      Call SnapshotUpdateRun
+    ${EndIf}
+    ${If} $UpdateOldRunPresent == 1
+      ${If} $UpdateOldRunType == 0
+        StrCpy $UpdatePhase "snapshot-run"
+        Call UpdateFailure
+      ${EndIf}
     ${EndIf}
   ${EndIf}
   ${If} $UpdateSourceExe != ""
@@ -560,11 +879,24 @@ Section "Sandglass" SecMain
   ${EndIf}
 
   ${If} $UpdateMode == 1
+    ; Merge owner content into staging while the original install is still
+    ; untouched. A reparse point or copy failure therefore aborts before the
+    ; rollback rename, leaving the old tree byte-for-byte intact.
+    ${If} $UpdateHasInstalled == 1
+      StrCpy $UpdatePreserveSource "$R0"
+      StrCpy $UpdatePreserveTarget "$UpdateStage"
+      Call PreserveUpdateExtras
+      ${If} $UpdatePreserveOk != 1
+        StrCpy $UpdatePhase "preserve-install-extras"
+        Call UpdateFailure
+      ${EndIf}
+    ${Else}
+      StrCpy $UpdatePreserveOk 1
+    ${EndIf}
     ; Only an actual prior Sandglass install is moved aside. An empty registry
     ; value is the normal portable-to-installed path and is never a delete or
     ; rename target.
-    ${If} $R0 != ""
-      ${AndIf} ${FileExists} "$R0\Sandglass.exe"
+    ${If} $UpdateHasInstalled == 1
       StrCpy $UpdateBackup "$INSTDIR.update-backup"
       ${If} ${FileExists} "$UpdateBackup\Sandglass.exe"
         StrCpy $UpdatePhase "backup-exists"
@@ -596,16 +928,15 @@ Section "Sandglass" SecMain
     StrCpy $UpdateStage ""
   ${EndIf}
 
-!ifdef SANDGLASS_TEST_FAULT_POST_ACTIVATION
-  ; Test-only compile fault: exercise the same rollback path used when a
-  ; post-activation filesystem or registry write reports ${Errors}. This
-  ; symbol is never supplied by the ordinary release build.
+  ; Snapshot just before replacing the link. Failures before this point leave
+  ; the user's existing Start Menu state completely untouched.
   ${If} $UpdateMode == 1
-    StrCpy $UpdatePhase "fault-post-activation"
-    Call UpdateFailure
+    Call SnapshotUpdateShortcut
+    ${If} $UpdateShortcutCaptured != 1
+      StrCpy $UpdatePhase "snapshot-shortcut"
+      Call UpdateFailure
+    ${EndIf}
   ${EndIf}
-!endif
-
   ClearErrors
   CreateDirectory "$SMPROGRAMS\Sandglass"
   ${If} ${Errors}
@@ -623,6 +954,9 @@ Section "Sandglass" SecMain
       Call UpdateFailure
     ${EndIf}
     Abort
+  ${EndIf}
+  ${If} $UpdateMode == 1
+    StrCpy $UpdateShortcutChanged 1
   ${EndIf}
 !ifdef IMPORT_UNINST
   ClearErrors
@@ -646,6 +980,60 @@ Section "Sandglass" SecMain
       Call UpdateFailure
     ${EndIf}
     Abort
+  ${EndIf}
+!ifdef SANDGLASS_TEST_FAULT_POST_ACTIVATION
+  ; Test-only fault is deliberately after the shortcut and partial registry
+  ; writes, so smoke proves the real rollback rather than an early abort.
+  ${If} $UpdateMode == 1
+    ClearErrors
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName" "Sandglass"
+    ${If} ${Errors}
+      StrCpy $UpdatePhase "fault-precondition-write"
+      Call UpdateFailure
+    ${EndIf}
+    StrCpy $UpdatePhase "fault-post-activation"
+    Call UpdateFailure
+  ${EndIf}
+!endif
+
+  ; A portable install may have an explicit sandglass Run value pointing to
+  ; the portable executable. Preserve its arguments and value kind while
+  ; moving that opt-in to the installed executable. No value means no opt-in.
+  ${If} $UpdateMode == 1
+    ${If} $UpdateHasInstalled != 1
+      ${If} $UpdateOldRunPresent == 1
+        StrCpy $R2 '"$UpdateRestartExe"'
+        StrLen $R3 $R2
+        StrCpy $R4 $UpdateOldRunValue $R3
+        ${If} $R4 == $R2
+          StrCpy $R5 $UpdateOldRunValue "" $R3
+          StrCpy $R6 '"$INSTDIR\Sandglass.exe"$R5'
+        ${Else}
+          StrCpy $R2 "$UpdateRestartExe"
+          StrLen $R3 $R2
+          StrCpy $R4 $UpdateOldRunValue $R3
+          ${If} $R4 != $R2
+            StrCpy $R2 ""
+          ${Else}
+            StrCpy $R5 $UpdateOldRunValue "" $R3
+            StrCpy $R6 "$INSTDIR\Sandglass.exe$R5"
+          ${EndIf}
+        ${EndIf}
+        ${If} $R2 != ""
+          StrCpy $UpdateRunChanged 1
+          ClearErrors
+          ${If} $UpdateOldRunType == 2
+            WriteRegExpandStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass" "$R6"
+          ${Else}
+            WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass" "$R6"
+          ${EndIf}
+          ${If} ${Errors}
+            StrCpy $UpdatePhase "write-run-migration"
+            Call UpdateFailure
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
   ClearErrors
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "DisplayName" "Sandglass"
@@ -703,10 +1091,19 @@ Section "Sandglass" SecMain
   ${EndIf}
 
   ${If} $UpdateMode == 1
-    ${If} $UpdateBackup != ""
-      RMDir /r "$UpdateBackup"
+    ; Keep the old tree available until the activated executable proves it can
+    ; start its packaged runtime. This catches SAC/startup failures while a
+    ; complete rollback is still possible.
+    ClearErrors
+    ExecWait '"$INSTDIR\Sandglass.exe" --self-test' $0
+    ${If} ${Errors}
+      StrCpy $UpdatePhase "self-test-launch"
+      Call UpdateFailure
     ${EndIf}
-    Delete "$UpdateFailureLog"
+    ${If} $0 != 0
+      StrCpy $UpdatePhase "self-test"
+      Call UpdateFailure
+    ${EndIf}
   ${EndIf}
 
   ; MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws. Without this
@@ -718,7 +1115,27 @@ Section "Sandglass" SecMain
     ; Hide first so the visible order is progress complete, installer gone,
     ; then the new Sandglass window -- not two overlapping windows.
     ShowWindow $HWNDPARENT 0
-    Exec '"$INSTDIR\Sandglass.exe"'
+    ClearErrors
+    ClearErrors
+    Call LaunchUpdateDesktop
+    ${If} ${Errors}
+      StrCpy $UpdatePhase "ready-launch"
+      Call UpdateFailure
+    ${EndIf}
+    Call WaitForUpdateReady
+    ${If} $UpdateReadyHandle != ""
+      System::Call 'kernel32::CloseHandle(p $UpdateReadyHandle)'
+      StrCpy $UpdateReadyHandle ""
+    ${EndIf}
+    ; Only the real desktop readiness signal retires rollback.  Keep both the
+    ; old directory and its shortcut snapshot until that point.
+    ${If} $UpdateBackup != ""
+      RMDir /r "$UpdateBackup"
+    ${EndIf}
+    ${If} $UpdateShortcutBackup != ""
+      Delete "$UpdateShortcutBackup"
+    ${EndIf}
+    Delete "$UpdateFailureLog"
   ${ElseIf} ${Silent}
     Exec '"$INSTDIR\Sandglass.exe"'
   ${EndIf}
@@ -804,8 +1221,10 @@ Section "Uninstall"
   Delete "$INSTDIR\PRIVACY.md"
   Delete "$INSTDIR\SUPPORT.md"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
+  Delete "$INSTDIR\Sandglass-owned-paths.json"
   RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"
   Delete "$INSTDIR\Uninstall.exe"
+  Delete "$INSTDIR\.sandglass-owner"
   RMDir "$INSTDIR"
 SectionEnd
 !endif

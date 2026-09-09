@@ -3049,7 +3049,7 @@
       if (!offer || !offer.version) return "";
       const icon = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><g class="badge-arrow"><path d="M9 4v6.6"/><path d="m6.9 8.5 2.1 2.1 2.1-2.1"/></g><path d="M4.9 13.9h8.2"/></svg>`;
       const tip = t("updateTooltip", { version: offer.version });
-      return `<span class="update-badge-wrap"><button type="button" class="update-badge" data-act="update-badge" aria-label="${esc(t("updateTitle", { version: offer.version }))}" aria-describedby="update-tooltip">${icon}</button><span id="update-tooltip" class="update-tooltip" role="tooltip">${esc(tip)}</span></span>`;
+      return `<span class="update-badge-wrap"><button type="button" class="update-badge" data-act="update-badge" aria-label="${esc(t("updateTitle", { version: offer.version }))}" aria-haspopup="dialog" aria-expanded="${state.updateDialogOpen ? "true" : "false"}" aria-describedby="update-tooltip">${icon}</button><span id="update-tooltip" class="update-tooltip" role="tooltip">${esc(tip)}</span></span>`;
     }
 
     function announcementNotesHtml(notes) {
@@ -3082,22 +3082,30 @@
         const a = state.announcement;
         const titleId = "update-announcement-title";
         const bodyId = "update-announcement-body";
-        return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(a.version)} ${esc(t("announcementTitle"))}</h2><button type="button" class="update-dialog-close" data-act="announcement-dismiss" aria-label="${esc(t("announcementClose"))}">×</button></div><div class="update-dialog-body" id="${bodyId}">${announcementNotesHtml(a.notes)}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-primary" data-act="announcement-dismiss"${state.announcementDismissing ? ' disabled aria-busy="true"' : ""}>${esc(t("announcementDismiss"))}</button></div></section></div>`;
+        return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(a.version)} ${esc(t("announcementTitle"))}</h2><button type="button" class="update-dialog-close" data-act="announcement-dismiss" aria-label="${esc(t("announcementClose"))}"${state.announcementDismissing ? ' disabled aria-busy="true"' : ""}>×</button></div><div class="update-dialog-body" id="${bodyId}">${announcementNotesHtml(a.notes)}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-primary" data-act="announcement-dismiss"${state.announcementDismissing ? ' disabled aria-busy="true"' : ""}>${esc(t("announcementDismiss"))}</button></div></section></div>`;
       }
       const offer = state.update;
       if (!offer || !offer.version) return "";
       const titleId = "update-confirm-title";
       const bodyId = "update-confirm-body";
       const error = state.updateError ? `<p class="update-dialog-error" role="alert">${esc(t("updateFailed"))}</p>` : "";
-      return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(t("updateConfirmTitle"))}</h2><button type="button" class="update-dialog-close" data-act="update-cancel" aria-label="${esc(t("updateCancel"))}">×</button></div><div class="update-dialog-body" id="${bodyId}"><p>${esc(t("updateConfirmDescription", { version: offer.version }))}</p><p>${esc(t("updateCopy"))}</p>${error}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-cancel" data-act="update-cancel"${state.updateApplying ? " disabled" : ""}>${esc(t("updateCancel"))}</button><button type="button" class="update-dialog-primary" data-act="apply-update"${state.updateApplying ? ' disabled aria-busy="true"' : ""}>${esc(t(state.updateApplying ? "updateApplying" : "updateInstallRestart"))}</button></div></section></div>`;
+      return `<div class="update-dialog-backdrop"><section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${bodyId}"><div class="update-dialog-head"><h2 id="${titleId}">${esc(t("updateConfirmTitle"))}</h2><button type="button" class="update-dialog-close" data-act="update-cancel" aria-label="${esc(t("updateCancel"))}"${state.updateApplying ? ' disabled aria-busy="true"' : ""}>×</button></div><div class="update-dialog-body" id="${bodyId}"><p>${esc(t("updateConfirmDescription", { version: offer.version }))}</p><p>${esc(t("updateCopy"))}</p>${error}</div><div class="update-dialog-actions"><button type="button" class="update-dialog-cancel" data-act="update-cancel"${state.updateApplying ? " disabled" : ""}>${esc(t("updateCancel"))}</button><button type="button" class="update-dialog-primary" data-act="apply-update"${state.updateApplying ? ' disabled aria-busy="true"' : ""}>${esc(t(state.updateApplying ? "updateApplying" : "updateInstallRestart"))}</button></div></section></div>`;
+    }
+
+    function normalizeUpdateOffer(offer) {
+      return offer && offer.version && offer.apply_supported === true ? offer : null;
     }
 
     async function loadUpdate(force = false) {
       try {
         const response = await fetch(force ? "/api/update?force=1" : "/api/update");
-        if (!response.ok) return;
+        if (!response.ok) {
+          state.update = null;
+          render();
+          return;
+        }
         const offer = await response.json();
-        state.update = offer && offer.version ? offer : null;
+        state.update = normalizeUpdateOffer(offer);
       } catch (_) {
         state.update = null;
       }
@@ -3133,6 +3141,7 @@
 
     function closeUpdateDialog() {
       if (state.announcementOpen) return dismissAnnouncement();
+      if (state.updateApplying) return;
       state.updateDialogOpen = false;
       state.updateError = "";
       render();
@@ -3144,13 +3153,21 @@
       const version = state.announcement.version;
       state.announcementDismissing = true;
       render();
+      let dismissed = false;
       try {
-        await fetch("/api/update/announcement/dismiss", {
+        const response = await fetch("/api/update/announcement/dismiss", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ version }),
         });
+        const result = response.ok ? await response.json() : null;
+        dismissed = !!(result && result.ok === true && result.dismissed === true);
       } catch (_) {}
+      if (!dismissed) {
+        state.announcementDismissing = false;
+        render();
+        return;
+      }
       state.announcementOpen = false;
       state.announcement = null;
       state.announcementDismissing = false;
@@ -3447,7 +3464,7 @@
         ? `<div class="app-menu-options" role="group" aria-label="${esc(t("language"))}">${options}</div>`
         : "";
       return `<button type="button" class="app-menu-button" data-act="app-menu" aria-label="${esc(t("menu"))}" aria-haspopup="menu" aria-controls="app-menu-panel" aria-expanded="${state.appMenu ? "true" : "false"}">${icon}</button>${updateBadgeHtml()}
-        ${state.appMenu ? `<div class="app-menu-panel" id="app-menu-panel" role="menu" aria-label="${esc(t("menu"))}"><button type="button" class="app-menu-item" data-act="help-open" role="menuitem">${helpIcon}<span>${esc(t("help"))}</span></button><button type="button" class="app-menu-item" data-act="mode-change" role="menuitem">${modeIcon}<span>${esc(t("modeChange"))}</span></button><div class="app-menu-divider" aria-hidden="true"></div><button type="button" class="app-menu-item language-toggle" data-act="language-toggle" role="menuitem" aria-haspopup="true" aria-expanded="${state.languageOptions ? "true" : "false"}"><span class="grow">${esc(t("languageOptions"))}</span><span class="menu-value">${esc(currentLanguage)}</span>${chevronIcon}</button>${languageOptions}</div>` : ""}`;
+        ${state.appMenu ? `<div class="app-menu-panel" id="app-menu-panel" role="menu" aria-label="${esc(t("menu"))}"><button type="button" class="app-menu-item" data-act="help-open" role="menuitem">${helpIcon}<span>${esc(t("help"))}</span></button><button type="button" class="app-menu-item" data-act="mode-change" role="menuitem">${modeIcon}<span>${esc(t("modeChange"))}</span></button><div class="app-menu-divider" aria-hidden="true"></div><button type="button" class="app-menu-item language-toggle" data-act="language-toggle" role="menuitem" aria-haspopup="menu" aria-expanded="${state.languageOptions ? "true" : "false"}"><span class="grow">${esc(t("languageOptions"))}</span><span class="menu-value">${esc(currentLanguage)}</span>${chevronIcon}</button>${languageOptions}</div>` : ""}`;
     }
 
     function revealSelectedLanguage() {

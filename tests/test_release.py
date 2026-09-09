@@ -26,10 +26,12 @@ from tools.runtime_licenses import (
     read_exact_constraints,
 )
 from tools.windows_release import (
+    PRODUCT_PATHS_MANIFEST,
     REQUIRED_LICENSE_COMPONENTS,
     create_portable_zip,
     inspect_bundle,
     inspect_runtime_sbom,
+    write_owned_paths_manifest,
 )
 
 
@@ -191,6 +193,9 @@ class ReleaseMetadataTests(unittest.TestCase):
         installer_smoke = (ROOT / "tools" / "smoke_windows_installer.ps1").read_text(
             encoding="utf-8"
         )
+        update_smoke = (ROOT / "tools" / "smoke_windows_update.ps1").read_text(
+            encoding="utf-8"
+        )
         prepare_signing = (ROOT / "tools" / "prepare_windows_signing.ps1").read_text(
             encoding="utf-8"
         )
@@ -214,6 +219,11 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('$pythonVersion -ne "3.13.15"', build_script)
         self.assertIn("--self-test", build_script)
         self.assertIn("python -m tools.windows_release inspect", build_script)
+        self.assertIn("python -m tools.windows_release write-owned-manifest", build_script)
+        self.assertLess(
+            build_script.index("write-owned-manifest"),
+            build_script.index("python -m tools.windows_release inspect $bundle"),
+        )
         self.assertIn("tools.runtime_licenses", build_script)
         self.assertIn("THIRD_PARTY_NOTICES.md", build_script)
         self.assertIn("tools.build_provenance", build_script)
@@ -238,10 +248,10 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertTrue(probe.rstrip().endswith("? e'"), probe.strip())
         self.assertNotIn("kernel32::GetLastError()", installer)
         self.assertIn("SetErrorLevel 3", installer)
-        self.assertNotIn(
-            'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run"',
-            installer,
-        )
+        # Ordinary installation must not opt the user into login startup. The
+        # updater may preserve an already opted-in portable Run value, so this
+        # is measured by the Windows smoke rather than forbidden as source text.
+        self.assertIn("Ordinary install changed the Sandglass Run value", update_smoke)
         self.assertNotIn(
             'WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run"',
             installer,
@@ -284,15 +294,16 @@ class ReleaseMetadataTests(unittest.TestCase):
         script_path = ROOT / "tools" / "smoke_windows_update.ps1"
         self.assertTrue(script_path.is_file())
         script = script_path.read_text(encoding="utf-8")
-        # The smoke is allowed to mutate only its generated temp tree and the
-        # two exact HKCU keys it snapshots/restores. These are protocol guards,
+        # The smoke is allowed to mutate only its generated temp tree, the
+        # exact HKCU keys it snapshots/restores, and the product-owned Start
+        # Menu link which it snapshots/restores byte-for-byte. These are guards,
         # not comments: each phrase is part of an executable operation below.
         for parameter in ("$OldInstaller", "$NewInstaller", "$ExpectedGitCommit"):
             self.assertIn(parameter, script)
         for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "SANDGLASS_HOME"):
             self.assertIn("$env:" + name, script)
-        self.assertIn('"/S", "/D=$installDir"', script)
-        self.assertIn('"/UPDATE", "/PARENTPID=$oldPanelPid", "/RESTARTEXE=$oldExe"', script)
+        self.assertIn("$oldInstallArgs = '/S /D=' + $activeDir", script)
+        self.assertIn("$newArgs = ('/UPDATE /PARENTPID=' + $oldPanelPid", script)
         self.assertIn("/UPDATE", script)
         self.assertIn("-match '(?i)(^|\\s)/S(?:\\s|$)'", script)
         self.assertIn('Invoke-InstalledStop', script)
@@ -308,6 +319,19 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('git_head', script)
         self.assertIn('"$installDir.update-backup"', script)
         self.assertIn('"Sandglass-update-$oldPanelPid"', script)
+        self.assertIn('$updateReadyToken = [Guid]::NewGuid().ToString("N")', script)
+        self.assertIn("' /RESTARTEXE=\"' + $oldExe + '\" /UPDATE_TOKEN='", script)
+        self.assertIn("RequestedSmokeRoot", script)
+        self.assertIn("CandidateBundle", script)
+        self.assertIn("NsisCompiler", script)
+        self.assertIn('"/DSANDGLASS_TEST_UPDATE_TARGET=$installDir"', script)
+        self.assertIn("CandidateBundle provenance does not equal ExpectedGitCommit", script)
+        self.assertIn("ExpectRollback requires CandidateBundle and NsisCompiler", script)
+        self.assertIn('"/DSANDGLASS_TEST_FAULT_POST_ACTIVATION"', script)
+        self.assertIn("Portable-to-installed update did not activate the expected new build provenance", script)
+        self.assertIn('Join-Path $smokeRoot "installed target"', script)
+        self.assertIn('EventWaitHandle]::OpenExisting($updateReadyEventName)', script)
+        self.assertIn('The new desktop did not emit its direct UI-ready event', script)
         self.assertIn('Save-RegistryKey $oldInstallKey', script)
         self.assertIn('Restore-RegistryKey $oldInstallKey', script)
         self.assertIn('Restore-RegistryKey $oldUninstallKey', script)
@@ -345,6 +369,10 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertIn(f"Wait-ProcessExitBounded {process_name}", script)
         self.assertIn("Save-RunValue", script)
         self.assertIn("Restore-RunValue", script)
+        self.assertIn("Get-ShortcutState", script)
+        self.assertIn("Assert-ShortcutState", script)
+        self.assertIn("original-sandglass.lnk", script)
+        self.assertIn("Fault-injected update did not restore the Sandglass Run value", script)
         self.assertIn("RegistryValueKind", script)
         self.assertIn("DoNotExpandEnvironmentNames", script)
         self.assertIn("$State.Value.Exported = $true", script)
@@ -438,6 +466,106 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertNotEqual(mutated_run.returncode, 0)
         self.assertNotIn("AFTER", mutated_run.stdout)
         self.assertIn("NativeCommandError", mutated_run.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell is required")
+    def test_update_extra_preserver_merges_owner_paths_without_old_product_bytes(self):
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            self.skipTest("Windows PowerShell is required")
+        helper = ROOT / "tools" / "preserve_update_extras.ps1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, new = root / "old", root / "new"
+            for path in (old / "_internal", new / "_internal",
+                         old / "owner-custom" / "empty", new / "owner-custom"):
+                path.mkdir(parents=True, exist_ok=True)
+            (old / "Sandglass.exe").write_bytes(b"old-product")
+            (new / "Sandglass.exe").write_bytes(b"new-product")
+            (old / "_internal" / "obsolete.dll").write_bytes(b"obsolete")
+            (new / "_internal" / "current.dll").write_bytes(b"current")
+            (old / "owner-custom" / "shared.txt").write_bytes(b"same")
+            (new / "owner-custom" / "shared.txt").write_bytes(b"same")
+            (old / "owner-custom" / "old-only.txt").write_bytes(b"owner")
+            (new / "owner-custom" / "new-only.txt").write_bytes(b"new-owner")
+            (old / PRODUCT_PATHS_MANIFEST).write_text(
+                json.dumps({
+                    "schema": 1,
+                    "paths": [
+                        "LICENSE", "PRIVACY.md", "SUPPORT.md",
+                        PRODUCT_PATHS_MANIFEST, "Sandglass.exe",
+                        "THIRD_PARTY_LICENSES", "THIRD_PARTY_NOTICES.md",
+                        "Uninstall.exe", "_internal", "legacy-helper.dll",
+                    ],
+                }), encoding="utf-8",
+            )
+            (old / "legacy-helper.dll").write_bytes(b"old-product")
+
+            completed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                 "-Old", str(old), "-New", str(new)],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual((new / "Sandglass.exe").read_bytes(), b"new-product")
+            self.assertTrue((new / "_internal" / "current.dll").is_file())
+            self.assertFalse((new / "_internal" / "obsolete.dll").exists())
+            self.assertFalse((new / "legacy-helper.dll").exists())
+            self.assertEqual(
+                (new / "owner-custom" / "old-only.txt").read_bytes(), b"owner"
+            )
+            self.assertEqual(
+                (new / "owner-custom" / "new-only.txt").read_bytes(), b"new-owner"
+            )
+            self.assertTrue((new / "owner-custom" / "empty").is_dir())
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell is required")
+    def test_update_extra_preserver_fails_closed_on_malformed_product_manifest(self):
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            self.skipTest("Windows PowerShell is required")
+        helper = ROOT / "tools" / "preserve_update_extras.ps1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, new = root / "old", root / "new"
+            old.mkdir(); new.mkdir()
+            (old / PRODUCT_PATHS_MANIFEST).write_text("{not-json", encoding="utf-8")
+            (old / "owner-secret.txt").write_text("must-not-copy", encoding="utf-8")
+            completed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                 "-Old", str(old), "-New", str(new)],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertFalse((new / "owner-secret.txt").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction behavior is required")
+    def test_update_extra_preserver_refuses_reparse_points_before_copy(self):
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            self.skipTest("Windows PowerShell is required")
+        helper = ROOT / "tools" / "preserve_update_extras.ps1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old, new, target = root / "old", root / "new", root / "target"
+            old.mkdir(); new.mkdir(); target.mkdir()
+            (old / "owner-before.txt").write_bytes(b"must-not-partially-copy")
+            junction = old / "owner-link"
+            made = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+                capture_output=True, text=True,
+            )
+            if made.returncode != 0:
+                self.skipTest("could not create a test junction")
+            completed = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                 "-Old", str(old), "-New", str(new)],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertFalse((new / "owner-before.txt").exists())
 
     def test_runtime_sbom_gate_requires_runtime_and_rejects_build_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -551,7 +679,23 @@ class ReleaseMetadataTests(unittest.TestCase):
             )
             provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
 
+            write_owned_paths_manifest(root)
+
             self.assertEqual(inspect_bundle(root), [])
+            owned_manifest = root / PRODUCT_PATHS_MANIFEST
+            owned_manifest.write_text('{"schema":1,"paths":["Sandglass.exe"]}\n', encoding="utf-8")
+            self.assertTrue(any("product paths" in error for error in inspect_bundle(root)))
+            actual_paths = sorted(path.name for path in root.iterdir())
+            owned_manifest.write_bytes(
+                (json.dumps(
+                    {"schema": 1, "paths": actual_paths}, separators=(",", ":")
+                ) + "\n").encode("utf-8")
+            )
+            self.assertTrue(any(
+                "missing installer-created paths: Uninstall.exe" in error
+                for error in inspect_bundle(root)
+            ))
+            write_owned_paths_manifest(root)
             first = Path(tmp) / "first.zip"
             second = Path(tmp) / "second.zip"
             create_portable_zip(root, first)
@@ -665,6 +809,54 @@ class ReleaseMetadataTests(unittest.TestCase):
             expected = hashlib.sha256(b"wheel bytes").hexdigest()
             self.assertEqual(target.read_text(encoding="ascii"), f"{expected}  {wheel.name}\n")
 
+    def test_sign_manifest_script_output_is_accepted_by_python_verifier(self):
+        """Exercise the actual PowerShell signer-to-Python verification path."""
+        if os.name != "nt":
+            self.skipTest("the release verifier uses Windows CNG")
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        from sandglass.release_signature import verify_release_signature
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key = root / "release-key.txt"
+            manifest = root / "SHA256SUMS.windows"
+            manifest.write_text(
+                f"{'a' * 64}  Sandglass-9.9.9-windows-x64-unsigned-setup.exe\n",
+                encoding="ascii",
+            )
+            script = ROOT / "tools" / "sign_release_manifest.ps1"
+            quote = lambda path: "'" + str(path).replace("'", "''") + "'"
+            command = """
+$key = [System.Security.Cryptography.ECDsa]::Create(
+    [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
+$full = $key.ExportParameters($true)
+@(
+    [System.BitConverter]::ToString($full.D).Replace('-', ''),
+    [System.BitConverter]::ToString($full.Q.X).Replace('-', ''),
+    [System.BitConverter]::ToString($full.Q.Y).Replace('-', '')
+) | Set-Content -LiteralPath __KEY__ -Encoding ascii
+& __SCRIPT__ -PrivateKey __KEY__ -Manifest __MANIFEST__ -Version 9.9.9
+$q = $key.ExportParameters($false).Q
+Write-Output ('PUBLIC=' + ([System.BitConverter]::ToString($q.X) + [System.BitConverter]::ToString($q.Y)).Replace('-', ''))
+""".replace("__KEY__", quote(key)).replace("__SCRIPT__", quote(script)).replace(
+                "__MANIFEST__", quote(manifest))
+            result = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            public = next((line[7:].strip() for line in result.stdout.splitlines()
+                           if line.startswith("PUBLIC=")), "")
+            self.assertEqual(len(public), 128, result.stdout)
+            signature = (manifest.with_name(manifest.name + ".sig")
+                         ).read_text(encoding="ascii").strip()
+            self.assertTrue(verify_release_signature(
+                manifest.read_bytes(), bytes.fromhex(signature), public))
+            self.assertTrue(manifest.read_text(encoding="ascii").startswith(
+                "# Sandglass-Version: 9.9.9\n"))
+
     def test_public_policy_documents_state_the_product_boundaries(self):
         required = {
             "CONTRIBUTING.md": ("provider source map", "byte-for-byte invariance"),
@@ -736,8 +928,9 @@ class RunningInstallLifecycleTests(unittest.TestCase):
     the observer running out of a half-deleted directory, still writing to the
     state directory the uninstaller deliberately preserves.
 
-    The installer smoke test runs --self-test, which exits, and then uninstalls,
-    so it never exercises any of this.
+    The Windows smoke exercises the same stop-before-copy and stop-before-delete
+    lifecycle in a temporary install; these tests keep the source-level ordering
+    guard independent of that machine-dependent run.
     """
 
     def _nsi(self):
@@ -943,11 +1136,16 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         from sandglass import update
 
         seen = []
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.dict(os.environ, {"SANDGLASS_HOME": tmp}), \
-                mock.patch.object(update, "download_verified", lambda offer, into: into), \
-                mock.patch("subprocess.Popen", lambda args, **kw: seen.append(args)):
-            update.apply_update({"asset": "s-setup.exe", "version": "9.9.9"})
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                with mock.patch.dict(os.environ, {"SANDGLASS_HOME": tmp}), \
+                        mock.patch.object(update, "download_verified", lambda offer, into: into), \
+                        mock.patch("subprocess.Popen", lambda args, **kw: seen.append(args)):
+                    update.apply_update({"asset": "s-setup.exe", "version": "9.9.9"})
+            finally:
+                # Production exits here; the test substitutes Popen and must
+                # model that exit before its temporary SANDGLASS_HOME is removed.
+                update._release_update_gate()
         self.assertTrue(seen, "更新器必须启动安装器")
         self.assertIn("/UPDATE", seen[0], "更新器必须使用专用更新模式")
         self.assertTrue(any(arg.startswith("/PARENTPID=") for arg in seen[0]))
@@ -999,6 +1197,11 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('Call RestoreUpdateRegistry', failure)
         self.assertNotIn('DeleteRegKey HKCU "Software\\Sandglass"', failure)
         self.assertIn('Delete "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"', failure)
+        self.assertIn('$UpdateShortcutCaptured == 1', failure)
+        self.assertIn('$UpdateShortcutChanged == 1', failure)
+        self.assertIn('Rename "$UpdateShortcutBackup" "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"', failure)
+        self.assertIn('$UpdateShortcutDirectoryExisted != 1', failure)
+        self.assertIn('RMDir "$SMPROGRAMS\\Sandglass"', failure)
         restore = installer.split("Function RestoreUpdateRegistry", 1)[1].split(
             "FunctionEnd", 1
         )[0]
@@ -1006,16 +1209,133 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('DeleteRegKey /ifempty HKCU "Software\\Sandglass"', restore)
         self.assertIn('DeleteRegValue HKCU "Software\\Sandglass" "InstallDir"', restore)
 
+    def test_update_validates_new_self_test_before_deleting_backup(self):
+        installer = self._nsi()
+        section = self._section(SECMAIN)
+        selftest = section.index('ExecWait \'"$INSTDIR\\Sandglass.exe" --self-test\'')
+        delete_backup = section.index('RMDir /r "$UpdateBackup"')
+        self.assertLess(selftest, delete_backup)
+        self.assertIn('self-test-launch', section[selftest:delete_backup])
+        self.assertIn('self-test', section[selftest:delete_backup])
+        self.assertIn('/UPDATE_TOKEN=$UpdateReadySignal', installer)
+        self.assertIn('SetErrorLevel 23', installer)
+        self.assertIn('/UPDATE_TOKEN=', installer)
+        self.assertIn('CreateEventW', installer)
+        self.assertIn('WaitForMultipleObjects', installer)
+        self.assertNotIn('FileExists} "$UpdateReadySignal"', installer)
+
+    def test_update_preserves_owner_files_before_retiring_old_tree(self):
+        installer = self._nsi()
+        helper = (ROOT / "tools" / "preserve_update_extras.ps1").read_text(
+            encoding="utf-8"
+        )
+        section = self._section(SECMAIN)
+        self.assertIn('Function PreserveUpdateExtras', installer)
+        self.assertIn('File /oname=preserve_update_extras.ps1', installer)
+        for owned in ("Sandglass.exe", "_internal", "LICENSE", "PRIVACY.md",
+                      "SUPPORT.md", "THIRD_PARTY_LICENSES", "Uninstall.exe",
+                      PRODUCT_PATHS_MANIFEST):
+            self.assertIn(f'"{owned}"', helper)
+        self.assertIn("function Merge-OwnerPath", helper)
+        self.assertIn("Assert-NoReparse $oldFull", helper)
+        self.assertNotIn('FileOpen $4 "$INSTDIR\\.sandglass-owner" w', installer)
+        preserve = section.index('Call PreserveUpdateExtras')
+        backup = section.index('Rename "$INSTDIR" "$UpdateBackup"')
+        selftest = section.index('ExecWait \'"$INSTDIR\\Sandglass.exe" --self-test\'')
+        delete_backup = section.index('RMDir /r "$UpdateBackup"')
+        self.assertLess(preserve, backup)
+        self.assertLess(backup, selftest)
+        self.assertLess(preserve, delete_backup)
+        failure = installer.split('Function UpdateFailure', 1)[1].split('FunctionEnd', 1)[0]
+        self.assertNotIn('Call PreserveUpdateExtras', failure)
+        self.assertIn('$UpdatePreserveOk == 1', failure)
+
+    def test_update_ready_signal_is_required_and_precedes_backup_retirement(self):
+        installer = self._nsi()
+        section = self._section(SECMAIN)
+        self.assertIn('${GetOptions} "$R9" "/UPDATE_TOKEN=" $UpdateReadySignal', installer)
+        self.assertIn('Function WaitForUpdateReady', installer)
+        launch = section.index('Call LaunchUpdateDesktop')
+        wait = section.index('Call WaitForUpdateReady', launch)
+        delete_backup = section.index('RMDir /r "$UpdateBackup"')
+        self.assertLess(launch, wait)
+        self.assertLess(wait, delete_backup)
+        self.assertIn('ready-timeout', installer)
+        launcher = installer.split("Function LaunchUpdateDesktop", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        waiter = installer.split("Function WaitForUpdateReady", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertIn("t R0", launcher)
+        self.assertIn("p R1, p R2", launcher)
+        self.assertIn("p .r0, p .r1", launcher)
+        self.assertIn("StrCpy $UpdateChildHandle $0", launcher)
+        self.assertNotIn("StrCpy $UpdateChildHandle $R0", launcher)
+        self.assertIn("p R0", waiter)
+        self.assertNotIn("t r0", launcher)
+        self.assertNotIn("p r1, p r2", launcher)
+        parent_wait = installer.split("Function WaitForUpdateParent", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertIn("WaitForSingleObject(p r0, i 30000)", parent_wait)
+        self.assertIn('StrCpy $UpdatePhase "parent-exit-timeout"', parent_wait)
+        self.assertNotIn("0xFFFFFFFF", parent_wait)
+
+    def test_owner_file_guard_mutation_is_caught(self):
+        section = self._section(SECMAIN)
+        preserve = section.index('Call PreserveUpdateExtras')
+        backup = section.index('Rename "$INSTDIR" "$UpdateBackup"')
+        self.assertLess(preserve, backup)
+        # Reintroducing the old post-activation copy is caught by the same
+        # ordering rule: owner preservation must precede the rollback rename.
+        mutated = section.replace('Call PreserveUpdateExtras', '; moved', 1)
+        mutated = mutated.replace('StrCpy $UpdateBackupCreated 1',
+                                  'Call PreserveUpdateExtras\n    StrCpy $UpdateBackupCreated 1', 1)
+        with self.assertRaises(AssertionError):
+            self.assertLess(
+                mutated.index('Call PreserveUpdateExtras'),
+                mutated.index('Rename "$INSTDIR" "$UpdateBackup"'),
+            )
+
+    def test_portable_opt_in_run_migrates_and_preserves_value_kind(self):
+        installer = self._nsi()
+        self.assertIn('SnapshotUpdateRun', installer)
+        self.assertIn('UpdateOldRunPresent', installer)
+        self.assertIn('UpdateOldRunType', installer)
+        self.assertIn('WriteRegExpandStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"', installer)
+        self.assertIn('WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"', installer)
+        self.assertIn('SANDGLASS_TEST_FAULT_POST_ACTIVATION', installer)
+        snapshot = installer.split("Function SnapshotUpdateRun", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertIn("StrCpy $UpdateOldRunType 0", snapshot)
+        self.assertIn('StrCpy $UpdateOldRunType 1', snapshot)
+        self.assertIn('StrCpy $UpdateOldRunType 2', snapshot)
+        self.assertIn('GetValueKind', snapshot)
+        self.assertNotIn('reg.exe query', snapshot)
+        section = self._section(SECMAIN)
+        shortcut = section.index('CreateShortcut "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"')
+        migration = section.index('StrCpy $R2', shortcut)
+        self.assertLess(shortcut, migration)
+        self.assertIn('$UpdateHasInstalled != 1', section)
+        self.assertIn('$UpdateOldRunPresent == 1', section)
+
     def test_portable_update_never_uses_an_empty_install_registry_path(self):
         section = self._section(SECMAIN)
         activation = section[section.index('File /r "${SOURCEDIR}') :]
-        self.assertIn('${If} $R0 != ""', activation)
+        self.assertIn('${If} $UpdateHasInstalled == 1', activation)
         self.assertIn('Rename "$UpdateStage" "$INSTDIR"', activation)
         self.assertIn('Exec \'"$UpdateRestartExe"\'', self._nsi())
         self.assertIn('${If} $UpdateBackup != ""', activation)
         hide = activation.index("ShowWindow $HWNDPARENT 0")
-        relaunch = activation.index('Exec \'"$INSTDIR\\Sandglass.exe"\'', hide)
+        relaunch = activation.index("Call LaunchUpdateDesktop", hide)
         self.assertLess(hide, relaunch, "安装器窗口必须先消失，新版界面才能出现")
+        launcher = self._nsi().split("Function LaunchUpdateDesktop", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertIn('"$INSTDIR\\Sandglass.exe"', launcher)
+        self.assertIn("CreateProcessW", launcher)
 
     def test_update_staging_path_uses_only_a_canonical_numeric_parent_pid(self):
         nsi = self._nsi()
@@ -1054,7 +1374,7 @@ class RunningInstallLifecycleTests(unittest.TestCase):
     def test_the_state_directory_is_still_preserved(self):
         """The counterpart: stopping is not licence to delete the books."""
         section = self._section('Section "Uninstall"')
-        self.assertNotIn("$LOCALAPPDATA\sandglass", section.replace("; ", ""))
+        self.assertNotIn(r"$LOCALAPPDATA\sandglass", section.replace("; ", ""))
 
 
 if __name__ == "__main__":

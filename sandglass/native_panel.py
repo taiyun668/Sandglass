@@ -93,6 +93,7 @@ class NativePanel:
                  web_root: Path | None = None,
                  api_request: Callable[[str, str, str], object] | None = None,
                  on_opened: Callable[[], None] | None = None,
+                 on_ready: Callable[[], None] | None = None,
                  on_dock: Callable[[str | None, bool,
                                     tuple[int, int, int, int]], None] | None = None,
                  on_move: Callable[[tuple[int, int, int, int]], None] | None = None) -> None:
@@ -101,7 +102,8 @@ class NativePanel:
         self.web_root, self.api_request = web_root, api_request
         self.on_minimized, self.on_closed, self.on_locale = (
             on_minimized, on_closed, on_locale)
-        self.on_opened, self.on_dock, self.on_move = on_opened, on_dock, on_move
+        self.on_opened, self.on_ready = on_opened, on_ready
+        self.on_dock, self.on_move = on_dock, on_move
         self.app = self.window = self.web = None
         self.hwnd = 0
         self.surface = self.frame = self.web_host = self.outline = None
@@ -644,6 +646,9 @@ class NativePanel:
         self.frame.CacheMode = None
         self.animating = False
         self._apply_pending_height()
+        if (self.on_ready and self.ready and self.has_measured_height
+                and self.open and self.window.IsVisible):
+            self.on_ready()
 
     def minimize(self) -> None:
         self.pending_show = None
@@ -881,9 +886,9 @@ class NativePanel:
         if not self.quitting:
             self.on_closed()
 
-    def quit(self) -> None:
+    def quit(self) -> bool:
         if self.quitting:
-            return
+            return True
         self.quitting = True
         if self.dock:
             self.dock.stop()
@@ -891,4 +896,6 @@ class NativePanel:
             try:
                 self.window.Dispatcher.BeginInvoke(self.t["Action"](self.app.Shutdown))
             except Exception:
-                pass
+                self.quitting = False
+                return False
+        return True

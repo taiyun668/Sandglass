@@ -17,8 +17,19 @@ FORBIDDEN_TEXT = (
     b"grok_app_accounts_dir",
 )
 TEXT_SUFFIXES = {".cfg", ".html", ".ini", ".js", ".json", ".md", ".txt"}
+# This file is part of every bundle and is consumed by the installer when an
+# existing installation is upgraded.  Keep the format deliberately boring:
+# the sorted list of immediate children owned by this release.  It lets an
+# installer distinguish a user's extra file from a product file without
+# copying an old product tree back into a newer one.
+PRODUCT_PATHS_MANIFEST = "Sandglass-owned-paths.json"
+# NSIS creates this path after extracting the bundle.  It is still product
+# owned and must be declared so an old installed copy never gets preserved as
+# an owner file.
+INSTALLER_CREATED_PRODUCT_PATHS = {"Uninstall.exe"}
 REQUIRED_BUNDLE_PATHS = {
     "Sandglass.exe",
+    PRODUCT_PATHS_MANIFEST,
     "LICENSE",
     "PRIVACY.md",
     "SUPPORT.md",
@@ -62,10 +73,69 @@ REQUIRED_RUNTIME_COMPONENTS = {
 BUILD_ONLY_COMPONENTS = {"cyclonedx-bom", "pip", "pyinstaller"}
 
 
+def _owned_paths_payload(paths: list[str]) -> bytes:
+    return (
+        json.dumps({"schema": 1, "paths": sorted(paths)}, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def write_owned_paths_manifest(root: Path) -> Path:
+    """Write the deterministic manifest of this bundle's top-level children."""
+    if not root.is_dir():
+        raise ValueError(f"bundle does not exist: {root}")
+    paths = sorted({path.name for path in root.iterdir()} | INSTALLER_CREATED_PRODUCT_PATHS)
+    manifest = root / PRODUCT_PATHS_MANIFEST
+    # Include the manifest itself: it is a product byte and must never be
+    # treated as an owner file when preserving an older installation.
+    if PRODUCT_PATHS_MANIFEST not in paths:
+        paths.append(PRODUCT_PATHS_MANIFEST)
+    manifest.write_bytes(_owned_paths_payload(paths))
+    return manifest
+
+
+def _inspect_owned_paths_manifest(root: Path, files: dict[str, Path], errors: list[str]) -> None:
+    manifest_path = files.get(PRODUCT_PATHS_MANIFEST)
+    if manifest_path is None:
+        errors.append(f"missing {PRODUCT_PATHS_MANIFEST}")
+        return
+    try:
+        raw = manifest_path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+        paths = manifest.get("paths") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+            raise ValueError("unsupported product paths manifest schema")
+        if not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
+            raise ValueError("product paths must be a non-empty string list")
+        if paths != sorted(paths) or len(paths) != len(set(paths)):
+            raise ValueError("product paths must be sorted and unique")
+        missing_installer_paths = INSTALLER_CREATED_PRODUCT_PATHS - set(paths)
+        if missing_installer_paths:
+            raise ValueError(
+                "product paths manifest is missing installer-created paths: "
+                + ", ".join(sorted(missing_installer_paths))
+            )
+        for path in paths:
+            if not path or path in {".", ".."} or "/" in path or "\\" in path:
+                raise ValueError(f"unsafe product path: {path}")
+            if path not in {candidate.split("/", 1)[0] for candidate in files} and not (root / path).is_dir() and path not in INSTALLER_CREATED_PRODUCT_PATHS:
+                raise ValueError(f"product path is missing from bundle: {path}")
+        actual = sorted(candidate.name for candidate in root.iterdir())
+        if not set(actual).issubset(paths) or set(paths) - set(actual) - INSTALLER_CREATED_PRODUCT_PATHS:
+            raise ValueError("product paths do not match bundle top-level paths")
+        if raw != _owned_paths_payload(paths):
+            raise ValueError("product paths manifest is not deterministic")
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        errors.append(f"unreadable product paths manifest: {exc}")
+
+
 def inspect_bundle(root: Path) -> list[str]:
     """Return public-boundary and completeness errors in an onedir bundle."""
     errors: list[str] = []
+    if not root.is_dir():
+        return [f"bundle does not exist: {root}"]
     files = {path.relative_to(root).as_posix(): path for path in root.rglob("*") if path.is_file()}
+    _inspect_owned_paths_manifest(root, files, errors)
     for required in sorted(REQUIRED_BUNDLE_PATHS - files.keys()):
         errors.append(f"missing {required}")
     exe = files.get("Sandglass.exe")
@@ -241,6 +311,9 @@ def main(argv: list[str] | None = None) -> int:
     zip_parser.add_argument("bundle", type=Path)
     zip_parser.add_argument("target", type=Path)
 
+    manifest_parser = subparsers.add_parser("write-owned-manifest")
+    manifest_parser.add_argument("bundle", type=Path)
+
     checksum_parser = subparsers.add_parser("checksums")
     checksum_parser.add_argument("target", type=Path)
     checksum_parser.add_argument("artifacts", type=Path, nargs="+")
@@ -260,6 +333,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "zip":
         create_portable_zip(args.bundle, args.target)
         print(f"PASS portable archive {args.target}")
+        return 0
+    if args.command == "write-owned-manifest":
+        manifest = write_owned_paths_manifest(args.bundle)
+        print(f"PASS product paths manifest {manifest}")
         return 0
     if args.command == "inspect-sbom":
         errors = inspect_runtime_sbom(args.path)

@@ -13,11 +13,14 @@ correct dark state, not a failure.
 
 from __future__ import annotations
 
+import atexit
 import ctypes
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -25,6 +28,7 @@ import threading
 import urllib.error
 import urllib.request
 from ctypes import wintypes
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,7 +44,14 @@ ALLOWED_HOSTS = ("api.github.com", "github.com", "objects.githubusercontent.com"
 CHECK_TTL_SECONDS = 6 * 3600
 MAX_FEED_BYTES = 1 << 20
 MAX_INSTALLER_BYTES = 200 << 20
-INSTALLER_SUFFIX = "-windows-x64-setup.exe"
+# These are the only installer families the release tooling emits.  Keep the
+# names explicit: a portable zip is never an update executable, and a generic
+# ``endswith('-setup.exe')`` check would silently accept unrelated assets.
+INSTALLER_NAME_RE = re.compile(
+    r"^Sandglass-(?P<version>[^/\\]+)-windows-x64-"
+    r"(?P<variant>(?:(?:unsigned|signed)-)?(?:outer-)?)setup\.exe$",
+    re.IGNORECASE,
+)
 CHECKSUMS_NAME = "SHA256SUMS.windows"
 CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.windows.sig"
 
@@ -49,6 +60,130 @@ CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.windows.sig"
 RELEASE_PUBLIC_KEY = "21D35013DCA960BAE23B6A0C7CF08A79C888A45C0375F67A01D4FABA8E1A4B1E853FAA6A9C09D380272A2980AF44914CE109E07446A734BD7F3BC2A14D2D7EBA"
 
 _LOCK = threading.RLock()
+_UPDATE_GATE_NAME = "update-apply.lock"
+_UPDATE_GATE: tuple[Path, Any] | None = None
+
+
+class UpdateBusyError(RuntimeError):
+    """Another Sandglass process is already handing an update to its installer."""
+
+
+class UpdateGateError(RuntimeError):
+    """The OS could not initialize or support the update gate."""
+
+
+class UpdateStateLockError(RuntimeError):
+    """The short-lived cross-process state transaction lock failed."""
+
+
+def _gate_path() -> Path:
+    return meter_home() / _UPDATE_GATE_NAME
+
+
+def _is_lock_contention(exc: OSError) -> bool:
+    """Classify only an OS lock refusal as contention, not setup failures."""
+    return getattr(exc, "errno", None) in {
+        errno.EACCES, errno.EAGAIN, errno.EDEADLK,
+    }
+
+
+def _lock_file(path: Path, *, blocking: bool, error_type: type[RuntimeError],
+               purpose: str):
+    """Open and lock one byte, keeping the handle alive for the context."""
+    handle = None
+    lock_started = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+        if path.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        lock_started = True
+        if os.name == "nt":
+            import msvcrt
+
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            msvcrt.locking(handle.fileno(), mode, 1)
+        else:
+            import fcntl
+
+            mode = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), mode)
+    except (ImportError, OSError) as exc:
+        if handle is not None:
+            handle.close()
+        if lock_started and not blocking and _is_lock_contention(exc):
+            raise UpdateBusyError("an update is already in progress") from exc
+        raise error_type(f"could not initialize the Sandglass {purpose} lock") from exc
+    return handle
+
+
+def _unlock_file(handle: Any) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        pass
+    finally:
+        handle.close()
+
+
+def _acquire_update_gate() -> None:
+    """Take a Sandglass-owned cross-process update gate.
+
+    The OS byte-range lock is retained after Popen succeeds until this process
+    exits.  The OS releases it if the owner crashes, without PID probing
+    (``os.kill(pid, 0)`` is destructive on Windows) or stale-owner races.
+    """
+    global _UPDATE_GATE
+    with _LOCK:
+        if _UPDATE_GATE is not None:
+            raise UpdateBusyError("an update is already in progress")
+        path = _gate_path()
+        handle = _lock_file(
+            path, blocking=False, error_type=UpdateGateError,
+            purpose="update apply",
+        )
+        _UPDATE_GATE = (path, handle)
+
+
+def _release_update_gate() -> None:
+    global _UPDATE_GATE
+    with _LOCK:
+        gate, _UPDATE_GATE = _UPDATE_GATE, None
+        if gate is None:
+            return
+        _, handle = gate
+        _unlock_file(handle)
+
+
+@contextmanager
+def _state_transaction():
+    """Serialize one update-check.json read/modify/write transaction.
+
+    This lock is deliberately separate from the long-lived apply gate. Network
+    requests must happen outside it; callers reacquire it and reread state
+    immediately before writing their fields.
+    """
+    handle = _lock_file(
+        meter_home() / "update-state.lock", blocking=True,
+        error_type=UpdateStateLockError, purpose="update state",
+    )
+    try:
+        yield
+    finally:
+        _unlock_file(handle)
+
+
+atexit.register(_release_update_gate)
 
 
 def state_path() -> Path:
@@ -89,13 +224,48 @@ def _get(url: str, limit: int, timeout: float = 20.0) -> bytes:
 
 
 def checksum_for(text: str, name: str) -> str:
+    found = ""
+    matches = 0
     for line in text.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1].lstrip("*") == name:
+            matches += 1
             digest = parts[0].strip().lower()
             if re.fullmatch(r"[0-9a-f]{64}", digest):
-                return digest
-    return ""
+                found = digest
+    # A duplicate filename is ambiguous: accepting the first entry would make
+    # the manifest's meaning depend on ordering, so reject the whole asset.
+    return found if matches == 1 else ""
+
+
+def _installer_name(name: str, version: str) -> bool:
+    """Whether *name* is an exact, version-bound installer asset."""
+    match = INSTALLER_NAME_RE.fullmatch(str(name or ""))
+    return bool(match and match.group("version") == version)
+
+
+def _installer_priority(name: str) -> int:
+    """Prefer the outer/signature-bearing artifact when a release has both."""
+    match = INSTALLER_NAME_RE.fullmatch(str(name or ""))
+    variant = match.group("variant").lower() if match else ""
+    return {
+        "signed-outer-": 0,
+        "unsigned-outer-": 1,  # SignPath's signed outer keeps this build name.
+        "outer-": 2,
+        "signed-": 3,
+        "": 4,
+        "unsigned-": 5,
+    }.get(variant, 99)
+
+
+def _manifest_version(raw_sums: bytes) -> str:
+    """Read the signed manifest's mandatory version metadata line."""
+    try:
+        text = raw_sums.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+    versions = re.findall(r"^#\s*Sandglass-Version:\s*([^\s#]+)\s*$", text, re.MULTILINE)
+    return versions[0] if len(versions) == 1 else ""
 
 
 def offer_from(release: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +277,11 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
     for asset in release.get("assets") or []:
         if isinstance(asset, dict):
             assets[str(asset.get("name") or "")] = str(asset.get("browser_download_url") or "")
-    installer = next((name for name in assets if name.endswith(INSTALLER_SUFFIX)), "")
+    # Prefer a signed outer artifact when present; the ordinary unsigned build
+    # remains the deliberate no-certificate release path. All candidates must
+    # carry this release's exact version.
+    candidates = [name for name in assets if _installer_name(name, version)]
+    installer = min(candidates, key=_installer_priority) if candidates else ""
     if not installer or CHECKSUMS_NAME not in assets:
         # Without a published checksum there is nothing to verify against, so
         # there is nothing to offer. An update that cannot be checked is not an
@@ -118,7 +292,7 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
         sums = raw_sums.decode("utf-8", "replace")
         digest = checksum_for(sums, installer)
         url = _https(assets[installer])
-        manifest_signed = _manifest_signature_ok(raw_sums, assets)
+        manifest_signed = _manifest_signature_ok(raw_sums, assets, version, installer)
     except (urllib.error.URLError, OSError, ValueError):
         return {}
     if not digest:
@@ -142,7 +316,9 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _manifest_signature_ok(raw_sums: bytes, assets: dict[str, str]) -> bool:
+def _manifest_signature_ok(
+    raw_sums: bytes, assets: dict[str, str], version: str = "", installer: str = ""
+) -> bool:
     """Whether the checksum manifest carries this project's own signature.
 
     The manifest names the installer's digest, so a signature over the manifest
@@ -151,6 +327,15 @@ def _manifest_signature_ok(raw_sums: bytes, assets: dict[str, str]) -> bool:
     from sandglass.release_signature import verify_release_signature
 
     if not RELEASE_PUBLIC_KEY or CHECKSUMS_SIGNATURE_NAME not in assets:
+        return False
+    # A signature over an old checksum-only manifest is not a signature over
+    # this release identity.  Once a key exists, the signed version metadata
+    # and the installer filename must both agree with the tag.
+    if not version or not installer or _manifest_version(raw_sums) != version:
+        return False
+    if not _installer_name(installer, version):
+        return False
+    if not checksum_for(raw_sums.decode("ascii", "ignore"), installer):
         return False
     try:
         signature = _get(assets[CHECKSUMS_SIGNATURE_NAME], MAX_FEED_BYTES)
@@ -221,38 +406,53 @@ def _seconds_since_check(stored: dict[str, Any]) -> float | None:
 
 def available_update(force: bool = False) -> dict[str, Any]:
     """The offer to show, or {} for nothing. Cached, and never downloads."""
-    with _LOCK:
-        try:
+    try:
+        with _LOCK, _state_transaction():
             stored = _read_state()
-        except (OSError, ValueError) as exc:
-            record_component_failure("update_state_write", exc)
-            return {}
-        elapsed = _seconds_since_check(stored)
-        if not force and elapsed is not None and elapsed < CHECK_TTL_SECONDS:
-            cached = stored.get("offer")
-            return dict(cached) if isinstance(cached, dict) else {}
-        offer: dict[str, Any] = {}
-        error = ""
-        try:
-            release = json.loads(_get(FEED_URL, MAX_FEED_BYTES).decode("utf-8", "replace"))
-            if isinstance(release, dict):
-                offer = offer_from(release)
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            error = type(exc).__name__
-        try:
-            next_state = dict(stored)
-            next_state.update({
+            elapsed = _seconds_since_check(stored)
+            if not force and elapsed is not None and elapsed < CHECK_TTL_SECONDS:
+                cached = stored.get("offer")
+                return dict(cached) if isinstance(cached, dict) else {}
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_state_write", exc)
+        if force:
+            raise UpdateStateLockError(
+                "the update state could not be read or locked"
+            ) from exc
+        return {}
+
+    # The network is intentionally outside the state transaction. Another
+    # process may update pending_announcement while this request is in flight.
+    offer: dict[str, Any] = {}
+    error = ""
+    try:
+        release = json.loads(_get(FEED_URL, MAX_FEED_BYTES).decode("utf-8", "replace"))
+        if isinstance(release, dict):
+            offer = offer_from(release)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        error = type(exc).__name__
+
+    try:
+        with _LOCK, _state_transaction():
+            # Re-read after the network request, then merge only this check's
+            # fields. In particular, preserve an announcement written by an
+            # update handoff while the request was running.
+            latest = _read_state()
+            latest.update({
                 "checked_at": datetime.now(timezone.utc).isoformat(),
                 "current_version": __version__,
                 "offer": offer,
                 "error": error,
             })
-            # A successful check must not erase the announcement waiting for
-            # the first launch of the version it belongs to.
-            _write_state(next_state)
-        except OSError:
-            return offer
+            _write_state(latest)
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_state_write", exc)
+        if force:
+            raise UpdateStateLockError(
+                "the update state could not be committed"
+            ) from exc
         return offer
+    return offer
 
 
 def authenticode_valid(path: Path) -> bool:
@@ -348,44 +548,130 @@ def apply_update(offer: dict[str, Any]) -> dict[str, Any]:
     The installer relaunches Sandglass when it is done. The verified release
     metadata is retained until that new version has shown its announcement.
     """
-    name = str(offer.get("asset") or "sandglass-setup.exe")
-    staged = Path(tempfile.gettempdir()) / "sandglass-update" / name
-    download_verified(offer, staged)
     version = str(offer.get("version") or "")
     if not version:
         raise ValueError("the release did not publish a version")
-    with _LOCK:
-        stored = _read_state()
-        next_state = dict(stored)
-        next_state["pending_announcement"] = {
-            "version": version,
-            "notes": offer.get("notes") if isinstance(offer.get("notes"), str) else "",
-            "published_at": str(offer.get("published_at") or ""),
-            "notes_url": str(offer.get("notes_url") or ""),
+    _acquire_update_gate()
+    pending_record: dict[str, Any] | None = None
+    previous_pending: Any = None
+    previous_pending_present = False
+    try:
+        name = str(offer.get("asset") or "sandglass-setup.exe")
+        staged = Path(tempfile.gettempdir()) / "sandglass-update" / name
+        staged = download_verified(offer, staged)
+        # The installer creates a private, one-shot named event.  The random
+        # token is the only handoff capability; no command-line value is ever
+        # interpreted as a path by either side.
+        ready_token = secrets.token_hex(16)
+        with _LOCK, _state_transaction():
+            stored = _read_state()
+            previous_pending_present = "pending_announcement" in stored
+            previous_pending = stored.get("pending_announcement")
+            next_state = dict(stored)
+            pending_record = {
+                "version": version,
+                "notes": offer.get("notes") if isinstance(offer.get("notes"), str) else "",
+                "published_at": str(offer.get("published_at") or ""),
+                "notes_url": str(offer.get("notes_url") or ""),
+            }
+            next_state["pending_announcement"] = pending_record
+            _write_state(next_state)
+        process = subprocess.Popen(
+            [
+                str(staged),
+                "/UPDATE",
+                f"/PARENTPID={os.getpid()}",
+                f"/RESTARTEXE={Path(sys.executable).resolve()}",
+                f"/UPDATE_TOKEN={ready_token}",
+            ],
+            creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | NEW_PROCESS_GROUP
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        # Keep the gate until process exit.  The installer is detached and the
+        # caller quits immediately after this returns; a second click during
+        # that handoff must not launch another installer.
+        return {
+            "ok": True, "version": version, "staged": str(staged),
+            # Kept in-process only. The desktop strips private keys before
+            # serializing the response; they let it cancel a handoff when its
+            # own window cannot begin shutting down.
+            "_process": process,
+            "_pending_record": pending_record,
+            "_previous_pending": previous_pending,
+            "_previous_pending_present": previous_pending_present,
         }
-        _write_state(next_state)
-    subprocess.Popen(
-        [
-            str(staged),
-            "/UPDATE",
-            f"/PARENTPID={os.getpid()}",
-            f"/RESTARTEXE={Path(sys.executable).resolve()}",
-        ],
-        creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
-    return {"ok": True, "version": version, "staged": str(staged)}
+    except BaseException:
+        # Failed verification, state persistence, or Popen must allow a later
+        # attempt. If Popen failed after staging the announcement, undo only
+        # that field and preserve any concurrently refreshed offer metadata.
+        if pending_record is not None:
+            try:
+                with _LOCK, _state_transaction():
+                    current = _read_state()
+                    if current.get("pending_announcement") == pending_record:
+                        restored = dict(current)
+                        if previous_pending_present:
+                            restored["pending_announcement"] = previous_pending
+                        else:
+                            restored.pop("pending_announcement", None)
+                        _write_state(restored)
+            except (OSError, ValueError, UpdateStateLockError) as exc:
+                record_component_failure("update_state_write", exc)
+        # Success deliberately leaves the gate owned until atexit.
+        _release_update_gate()
+        raise
+
+
+def cancel_update_handoff(result: dict[str, Any]) -> bool:
+    """Cancel an installer that is still waiting for this desktop to exit.
+
+    This is used only when the desktop could not even begin shutting down. The
+    installer has not crossed its parent-exit gate, so confirming its process
+    exit is proof that no installation write occurred.
+    """
+    process = result.get("_process")
+    try:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+        if process is not None and process.poll() is None:
+            return False
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        return False
+
+    pending_record = result.get("_pending_record")
+    if isinstance(pending_record, dict):
+        try:
+            with _LOCK, _state_transaction():
+                current = _read_state()
+                if current.get("pending_announcement") == pending_record:
+                    restored = dict(current)
+                    if result.get("_previous_pending_present"):
+                        restored["pending_announcement"] = result.get("_previous_pending")
+                    else:
+                        restored.pop("pending_announcement", None)
+                    _write_state(restored)
+        except (OSError, ValueError, UpdateStateLockError) as exc:
+            record_component_failure("update_state_write", exc)
+            return False
+    _release_update_gate()
+    return True
+
+
+def public_update_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Remove in-process handoff handles before returning JSON to the panel."""
+    return {key: value for key, value in result.items() if not key.startswith("_")}
 
 
 def update_announcement() -> dict[str, Any]:
     """Return the current version's one-time release announcement, if any."""
-    with _LOCK:
-        try:
+    try:
+        with _LOCK, _state_transaction():
             stored = _read_state()
-        except (OSError, ValueError) as exc:
-            record_component_failure("update_state_write", exc)
-            return {}
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_state_write", exc)
+        return {}
     pending = stored.get("pending_announcement")
     if not isinstance(pending, dict) or pending.get("version") != __version__:
         return {}
@@ -395,19 +681,16 @@ def update_announcement() -> dict[str, Any]:
 def dismiss_update_announcement(version: str) -> dict[str, Any]:
     """Dismiss only the named version's announcement; never a newer one."""
     version = str(version or "")
-    with _LOCK:
-        try:
+    try:
+        with _LOCK, _state_transaction():
             stored = _read_state()
-        except (OSError, ValueError) as exc:
-            record_component_failure("update_state_write", exc)
-            return {"ok": False, "dismissed": False}
-        pending = stored.get("pending_announcement")
-        if not isinstance(pending, dict) or pending.get("version") != version:
-            return {"ok": False, "dismissed": False}
-        next_state = dict(stored)
-        next_state.pop("pending_announcement", None)
-        try:
+            pending = stored.get("pending_announcement")
+            if not isinstance(pending, dict) or pending.get("version") != version:
+                return {"ok": False, "dismissed": False}
+            next_state = dict(stored)
+            next_state.pop("pending_announcement", None)
             _write_state(next_state)
-        except OSError:
-            return {"ok": False, "dismissed": False}
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_state_write", exc)
+        return {"ok": False, "dismissed": False}
     return {"ok": True, "dismissed": True, "version": version}

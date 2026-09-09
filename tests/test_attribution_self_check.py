@@ -448,6 +448,9 @@ class DesktopLifecycleContextTests(unittest.TestCase):
             def native_opened(self, *_args):
                 return None
 
+            def native_ready(self, *_args):
+                return None
+
             def native_closed(self, *_args):
                 return None
 

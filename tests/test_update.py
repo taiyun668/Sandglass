@@ -12,6 +12,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -89,6 +93,56 @@ class OfferTests(unittest.TestCase):
     def test_a_checksum_file_that_omits_the_installer_offers_nothing(self):
         with patch.object(update, "_get", return_value=b"b" * 64 + b"  something-else.exe"):
             self.assertEqual(update.offer_from(self._release()), {})
+
+    def test_duplicate_checksum_entries_for_the_installer_are_rejected(self):
+        digest = "a" * 64
+        sums = "\n".join((
+            f"{digest}  {self.ASSET}",
+            f"{'b' * 64}  {self.ASSET}",
+        ))
+        self.assertEqual(update.checksum_for(sums, self.ASSET), "")
+
+    def test_release_tool_unsigned_setup_name_is_selected_but_portable_is_not(self):
+        release = self._release()
+        release["assets"] = [
+            {"name": "Sandglass-9.9.9-windows-x64-unsigned-portable.zip",
+             "browser_download_url": "https://github.com/a/b/portable.zip"},
+            {"name": "Sandglass-9.9.9-windows-x64-unsigned-setup.exe",
+             "browser_download_url": "https://github.com/a/b/setup.exe"},
+            {"name": update.CHECKSUMS_NAME,
+             "browser_download_url": "https://github.com/a/b/sums"},
+        ]
+        sums = b"a" * 64 + b"  Sandglass-9.9.9-windows-x64-unsigned-setup.exe\n"
+        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+            update, "_get", return_value=sums
+        ):
+            offer = update.offer_from(release)
+        self.assertEqual(offer["asset"],
+                         "Sandglass-9.9.9-windows-x64-unsigned-setup.exe")
+
+    def test_installer_from_another_version_is_not_selected(self):
+        release = self._release()
+        release["assets"][0]["name"] = "Sandglass-8.8.8-windows-x64-unsigned-setup.exe"
+        with patch.object(update, "_get", return_value=b"a" * 64):
+            self.assertEqual(update.offer_from(release), {})
+
+    def test_signed_outer_installer_wins_when_unsigned_build_is_also_published(self):
+        release = self._release()
+        unsigned = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
+        outer = "Sandglass-9.9.9-windows-x64-unsigned-outer-setup.exe"
+        release["assets"] = [
+            {"name": unsigned, "browser_download_url": "https://github.com/a/b/u.exe"},
+            {"name": outer, "browser_download_url": "https://github.com/a/b/o.exe"},
+            {"name": update.CHECKSUMS_NAME,
+             "browser_download_url": "https://github.com/a/b/sums"},
+        ]
+        sums = (b"a" * 64 + b"  " + unsigned.encode() + b"\n" +
+                b"b" * 64 + b"  " + outer.encode() + b"\n")
+        with patch.object(update, "RELEASE_PUBLIC_KEY", ""), patch.object(
+            update, "_get", return_value=sums
+        ):
+            offer = update.offer_from(release)
+        self.assertEqual(offer["asset"], outer)
 
 
 class HostTests(unittest.TestCase):
@@ -306,9 +360,9 @@ class CheckStateTests(unittest.TestCase):
                 patch("sandglass.update.record_component_failure",
                       lambda name, exc: reported.append(name)), \
                 patch.object(update, "_get", side_effect=OSError("404")):
-            offer = update.available_update(force=True)
+            with self.assertRaises(update.UpdateStateLockError):
+                update.available_update(force=True)
 
-        self.assertEqual(offer, {})
         self.assertEqual(path.read_text(encoding="utf-8"), original)
         self.assertEqual(reported, ["update_state_write"])
 
@@ -322,6 +376,71 @@ class CheckStateTests(unittest.TestCase):
             update.available_update(force=True)
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
         self.assertEqual(stored["pending_announcement"], state["pending_announcement"])
+
+    def test_fresh_check_merges_state_written_while_network_request_was_in_flight(self):
+        initial = {"offer": {"version": "8.8.8"}}
+        (self.home / "update-check.json").write_text(json.dumps(initial), encoding="utf-8")
+        entered = []
+
+        def slow_feed(*_args, **_kwargs):
+            # A second process must be able to take the short state lock while
+            # this request is in flight. If the network path held that lock,
+            # this bounded child would time out instead of writing the update.
+            child_code = (
+                "import json,os,sys\n"
+                "os.environ['SANDGLASS_HOME']=sys.argv[1]\n"
+                "from sandglass import update\n"
+                "with update._state_transaction():\n"
+                "    state=update._read_state(); state['pending_announcement']={'version':'9.9.9'}\n"
+                "    update._write_state(state)\n"
+            )
+            child = subprocess.run(
+                [sys.executable, "-c", child_code, str(self.home)],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True, text=True, timeout=3,
+            )
+            self.assertEqual(child.returncode, 0, child.stderr)
+            entered.append(True)
+            raise OSError("offline")
+
+        with patch.object(update, "_get", slow_feed):
+            update.available_update(force=True)
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertTrue(entered)
+        self.assertEqual(stored["pending_announcement"], {"version": "9.9.9"})
+
+    def test_two_process_state_transactions_do_not_lose_an_update(self):
+        """The lock must serialize a real cross-process read/modify/write."""
+        child_code = (
+            "import os,sys,time\n"
+            "os.environ['SANDGLASS_HOME']=sys.argv[1]\n"
+            "from sandglass import update\n"
+            "with update._state_transaction():\n"
+            "    state=update._read_state(); time.sleep(.20)\n"
+            "    state[sys.argv[2]]='written'; update._write_state(state)\n"
+        )
+        children = [subprocess.Popen(
+            [sys.executable, "-c", child_code, str(self.home), key],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) for key in ("first", "second")]
+        results = [child.communicate(timeout=10) for child in children]
+        self.assertEqual([child.returncode for child in children], [0, 0], results)
+        state = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(state.get("first"), "written")
+        self.assertEqual(state.get("second"), "written")
+
+    def test_gate_initialization_failure_is_not_reported_as_busy(self):
+        with patch.object(Path, "open", side_effect=PermissionError("cannot create lock")):
+            with self.assertRaises(update.UpdateGateError):
+                update._acquire_update_gate()
+        self.assertIsNone(update._UPDATE_GATE)
+
+    def test_state_lock_initialization_failure_has_its_own_error(self):
+        with patch.object(Path, "open", side_effect=PermissionError("cannot create lock")):
+            with self.assertRaises(update.UpdateStateLockError):
+                with update._state_transaction():
+                    self.fail("state transaction unexpectedly acquired a lock")
 
     def test_announcement_is_only_visible_to_its_installed_version(self):
         state = {"pending_announcement": {
@@ -356,6 +475,7 @@ class ApplyUpdateStateTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.home = Path(tmp.name)
+        self.addCleanup(update._release_update_gate)
 
     def test_verified_update_records_announcement_and_uses_update_parent_protocol(self):
         offer = {
@@ -367,16 +487,117 @@ class ApplyUpdateStateTests(unittest.TestCase):
         }
         seen = []
         with patch.object(update, "download_verified", return_value=Path("setup.exe")), \
+                patch.object(update.secrets, "token_hex", return_value="0123456789abcdef0123456789abcdef"), \
                 patch("subprocess.Popen", lambda args, **kwargs: seen.append(args)):
             result = update.apply_update(offer)
         self.assertTrue(result["ok"])
         self.assertEqual(seen[0][1:3], ["/UPDATE", f"/PARENTPID={os.getpid()}"])
         self.assertEqual(seen[0][3], f"/RESTARTEXE={Path(update.sys.executable).resolve()}")
+        self.assertEqual(seen[0][4], "/UPDATE_TOKEN=0123456789abcdef0123456789abcdef")
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
         self.assertEqual(stored["pending_announcement"], {
             "version": "9.9.9", "notes": "修复窗口",
             "published_at": offer["published_at"], "notes_url": offer["notes_url"],
         })
+
+    def test_failed_handoff_releases_the_gate(self):
+        offer = {"asset": "setup.exe", "version": "9.9.9"}
+        with patch.object(update, "download_verified",
+                          side_effect=ValueError("bad download")):
+            with self.assertRaises(ValueError):
+                update.apply_update(offer)
+        self.assertIsNone(update._UPDATE_GATE)
+
+    def test_popen_failure_removes_only_the_staged_announcement(self):
+        original = {"offer": {"version": "8.8.8"}, "checked_at": "2026-09-08T00:00:00Z"}
+        (self.home / "update-check.json").write_text(
+            json.dumps(original), encoding="utf-8"
+        )
+        offer = {"asset": "setup.exe", "version": "9.9.9", "notes": "new"}
+        with patch.object(update, "download_verified", return_value=Path("setup.exe")), \
+                patch("subprocess.Popen", side_effect=OSError("launch failed")):
+            with self.assertRaisesRegex(OSError, "launch failed"):
+                update.apply_update(offer)
+        stored = json.loads(
+            (self.home / "update-check.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(stored, original)
+        self.assertIsNone(update._UPDATE_GATE)
+
+    def test_cancelled_quit_handoff_stops_installer_restores_state_and_releases_gate(self):
+        original = {"offer": {"version": "8.8.8"}}
+        (self.home / "update-check.json").write_text(
+            json.dumps(original), encoding="utf-8"
+        )
+
+        class Process:
+            def __init__(self):
+                self.running = True
+                self.terminated = 0
+            def poll(self):
+                return None if self.running else 20
+            def terminate(self):
+                self.terminated += 1
+                self.running = False
+            def wait(self, timeout):
+                self.running = False
+                return 20
+
+        process = Process()
+        offer = {"asset": "setup.exe", "version": "9.9.9"}
+        with patch.object(update, "download_verified", return_value=Path("setup.exe")), \
+                patch("subprocess.Popen", return_value=process):
+            result = update.apply_update(offer)
+        self.assertTrue(update.cancel_update_handoff(result))
+        self.assertEqual(process.terminated, 1)
+        self.assertEqual(
+            json.loads((self.home / "update-check.json").read_text(encoding="utf-8")),
+            original,
+        )
+        self.assertIsNone(update._UPDATE_GATE)
+
+    def test_second_apply_is_busy_while_first_process_is_leaving(self):
+        offer = {"asset": "setup.exe", "version": "9.9.9"}
+        with patch.object(update, "download_verified", return_value=Path("setup.exe")), \
+                patch("subprocess.Popen"):
+            update.apply_update(offer)
+            with self.assertRaises(update.UpdateBusyError):
+                update.apply_update(offer)
+
+    def test_cross_process_gate_is_busy_and_released_when_owner_exits(self):
+        child_code = (
+            "import os,sys; "
+            "os.environ['SANDGLASS_HOME']=sys.argv[1]; "
+            "from sandglass import update; "
+            "update._acquire_update_gate(); "
+            "print('locked', flush=True); "
+            "sys.stdin.readline()"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(self.home)],
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        def cleanup_child():
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+
+        self.addCleanup(cleanup_child)
+        self.assertEqual(child.stdout.readline().strip(), "locked")
+        with self.assertRaises(update.UpdateBusyError):
+            update._acquire_update_gate()
+        self.assertIsNone(child.poll(), "busy probing must not terminate the owner")
+        child.stdin.close()
+        self.assertEqual(child.wait(timeout=10), 0)
+        update._acquire_update_gate()
+        self.assertIsNotNone(update._UPDATE_GATE)
 
 
 if __name__ == "__main__":
@@ -490,3 +711,62 @@ class ManifestSignedUpdateTests(unittest.TestCase):
                 self.assertTrue(update.offer_from(release), "没有密钥时行为不该改变")
             with patch.object(update, "RELEASE_PUBLIC_KEY", _TEST_PUBLIC_KEY):
                 self.assertEqual(update.offer_from(release), {})
+
+    def test_signed_manifest_must_bind_version_and_installer_name(self):
+        installer = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
+        sums = (b"# Sandglass-Version: 9.9.9\n" + b"a" * 64 + b"  " +
+                installer.encode() + b"\n")
+        assets = {
+            update.CHECKSUMS_SIGNATURE_NAME: "https://github.com/a/b/sig",
+        }
+        with patch.object(update, "RELEASE_PUBLIC_KEY", _TEST_PUBLIC_KEY), patch.object(
+            update, "_get", return_value=b"00"
+        ), patch("sandglass.release_signature.verify_release_signature", return_value=True):
+            self.assertTrue(update._manifest_signature_ok(
+                sums, assets, "9.9.9", installer))
+            high_installer = "Sandglass-10.0.0-windows-x64-unsigned-setup.exe"
+            high_tag_old_metadata = (
+                b"# Sandglass-Version: 9.9.9\n" + b"a" * 64 + b"  " +
+                high_installer.encode() + b"\n"
+            )
+            # Keep the high-tag installer and checksum unchanged; only the
+            # signed metadata remains from the old release. This must fail for
+            # version binding, not because the asset/checksum lookup changed.
+            self.assertTrue(update._installer_name(high_installer, "10.0.0"))
+            self.assertEqual(update.checksum_for(
+                high_tag_old_metadata.decode("ascii"), high_installer), "a" * 64)
+            self.assertFalse(update._manifest_signature_ok(
+                high_tag_old_metadata, assets, "10.0.0", high_installer))
+            self.assertFalse(update._manifest_signature_ok(
+                sums, assets, "10.0.0", installer))
+
+    def test_manifest_version_parser_accepts_sha256sum_comment_metadata(self):
+        raw = (b"# Sandglass-Version: 9.9.9\n" +
+               b"a" * 64 + b"  Sandglass-9.9.9-windows-x64-unsigned-setup.exe\n")
+        self.assertEqual(update._manifest_version(raw), "9.9.9")
+        self.assertEqual(update.checksum_for(raw.decode("ascii"),
+                                             "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"),
+                         "a" * 64)
+        self.assertEqual(update._manifest_version(
+            b"Sandglass-Version: 9.9.9\n" + raw.split(b"\n", 1)[1]), "")
+
+        # Exercise the parser that release consumers use too. Windows build
+        # hosts do not ship sha256sum, so retain the direct parser assertions
+        # above and run this extra check wherever the tool is available.
+        sha256sum = shutil.which("sha256sum")
+        if sha256sum:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                payload = root / "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
+                payload.write_bytes(b"payload")
+                digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+                manifest = root / update.CHECKSUMS_NAME
+                manifest.write_text(
+                    f"# Sandglass-Version: 9.9.9\n{digest}  {payload.name}\n",
+                    encoding="ascii",
+                )
+                checked = subprocess.run(
+                    [sha256sum, "--strict", "-c", str(manifest)],
+                    cwd=root, capture_output=True, text=True,
+                )
+                self.assertEqual(checked.returncode, 0, checked.stderr)
