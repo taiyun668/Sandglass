@@ -5,14 +5,11 @@ privacy or correctness boundary.
 
 ## Where this stands, and what to do next (2026-09-09)
 
-The canonical checkout is `D:\Sandglass`, and the product is stopped. Public
-`main` and tag `v0.1.3` resolve exactly to
-`159c32ea08dacd596f98e44e8e998a718f1f3223`. `v0.1.3` is the current full
-GitHub Release. Its five assets came from tag CI run `34381003563`; their
-GitHub digests match the downloaded files, all three entries in
-`SHA256SUMS.windows` match, and the Owner signature verifies with the public
-key embedded in the updater. Both main run `34380591595` and the tag run
-completed all four jobs successfully.
+The canonical checkout is `D:\Sandglass`. Sandglass `0.1.4` is the completed
+public release. Private base `fa22d668`; public `main` and tag `v0.1.4` resolve
+to `d04b81b`. Main CI run `34387837507` and tag CI run `34388118575` completed
+all four jobs successfully. The GitHub Release has five assets; their GitHub
+digests match the downloaded files, and the Owner manifest signature is valid.
 
 The dormant third-party Authenticode submission path has been removed from the
 release gate. No certificate, signing-service account or sponsor is required;
@@ -25,31 +22,43 @@ maintenance machine and a second Windows machine; a fault injected after the
 new desktop child was created also passed termination, old-version restart,
 old-provenance restoration, residue cleanup, owner-state preservation and
 provider-fixture byte invariance. Both wrappers recorded their own process exit
-code 0. The full suite is 765 tests, test isolation exits 0, and a fresh
-Grok-4.6 audit of `edf241e` returned ACCEPT with no worker file changes.
+code 0. The full suite is 768 tests OK, test isolation exits 0, and a fresh
+Grok-4.6 audit returned ACCEPT.
 
-The production feed is also live: the actual public `v0.1.1` source reads
-`/releases/latest` and receives a `v0.1.3` offer whose exact installer digest
-matches and whose manifest signature is valid; a `v0.1.3` client receives no
-offer. The remaining product observations are the Owner-visible in-app click
-sequence and a real provider-state transition, not release construction.
+The production `v0.1.3` feed offered signed `0.1.4`. Installed `0.1.4` on the
+maintenance machine runs outside the Codex/MSIX shadow from
+`C:\Users\Ayun\AppData\Local\Programs\Sandglass` with real UNC provenance, and
+the current offer is empty.
 
-A second LAN Windows 11 Pro machine supplied a real active desktop acceptance
-surface. Earlier `v0.1.2` setup and portable candidates ran there, and equivalent
-private `v0.1.3` builds completed install and update. The exact public
-`v0.1.3` setup and portable hashes were later rejected before process creation
-by that machine's enforced Smart App Control policy (`Code Integrity` 3033/3077,
-policy `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`). This per-hash cloud/policy
-result is recorded as an unsigned-community compatibility limit; security was
-not disabled and another rebuild was not used to manufacture a green hash.
+`newhost` / `DESKTOP-7LBHDMT` was measured as Sandglass-clean despite `.codex`
+/ `.grok` existing: no Sandglass install, state, process, registry or shortcut
+was present. The exact public `v0.1.4` assets were then downloaded there; all
+three manifest hashes and the Owner signature verified, the portable
+`--self-test` returned 0, and a silent standard-user install registered and ran
+the packaged `d04b81b` build without enabling start-at-login. A before/after
+comparison of all 7,719 provider files found zero path, length, mtime or SHA-256
+differences. The SSH-launched desktop was stopped after this mechanical gate.
+Its physical panel/orb/tray interaction, explicit start-at-login opt-in and
+uninstall are still pending. Earlier `v0.1.2` setup and portable candidates ran
+there, and equivalent private `v0.1.3` builds completed install and update. The
+exact public `v0.1.3` setup and portable hashes were later rejected before
+process creation by that machine's enforced Smart App Control policy
+(`Code Integrity` 3033/3077, policy `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`).
+This per-hash cloud/policy result is recorded as an unsigned-community
+compatibility limit; security was not disabled and another rebuild was not used
+to manufacture a green hash. The different public `v0.1.4` hash did not repeat
+that block in the mechanical acceptance.
+
+Physical accessibility, autostart, uninstall and a real provider-state
+transition are not complete.
 
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
 
 Two named audit failures must be interpreted at their capture time rather than
 turned into work automatically. `运行本体一致` is expected only when a running
-product reports an older HEAD than the checkout; there is no running-product
-claim while the product is stopped. `codex 开账后归属` is the known ledger gap;
+product reports an older HEAD than the checkout; the installed `0.1.4` is a
+packaged copy, not the checkout. `codex 开账后归属` is the known ledger gap;
 the checklist says do not make it green.
 
 **What an agent can advance without the Owner, highest value first:**
