@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "x64.nsh"
 
 !ifndef APPVERSION
-!define APPVERSION "0.1.5"
+!define APPVERSION "0.1.6"
 !endif
 !ifndef SOURCEDIR
   !define SOURCEDIR "..\dist\Sandglass"
@@ -61,6 +61,10 @@ Var UpdateShortcutCaptured
 Var UpdateShortcutExisted
 Var UpdateShortcutChanged
 Var UpdateShortcutDirectoryExisted
+Var UpdateDesktopShortcutBackup
+Var UpdateDesktopShortcutCaptured
+Var UpdateDesktopShortcutExisted
+Var UpdateDesktopShortcutChanged
 Var UpdatePreserveSource
 Var UpdatePreserveTarget
 Var UpdatePreserveOk
@@ -420,6 +424,22 @@ Function UpdateFailure
         RMDir "$SMPROGRAMS\Sandglass"
       ${EndIf}
     ${EndIf}
+    ; The desktop link is a separate user-visible object. Restore its exact
+    ; pre-update bytes instead of assuming it matched the Start Menu link.
+    ${If} $UpdateDesktopShortcutCaptured == 1
+      ${If} $UpdateDesktopShortcutChanged == 1
+        Delete "$DESKTOP\Sandglass.lnk"
+      ${EndIf}
+      ${If} $UpdateDesktopShortcutExisted == 1
+        ${If} ${FileExists} "$UpdateDesktopShortcutBackup"
+          ClearErrors
+          Rename "$UpdateDesktopShortcutBackup" "$DESKTOP\Sandglass.lnk"
+          ${If} ${Errors}
+            StrCpy $UpdatePhase "$UpdatePhase-rollback-desktop-shortcut"
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
     ${If} $UpdateStage != ""
       RMDir /r "$UpdateStage"
     ${EndIf}
@@ -642,6 +662,28 @@ Function SnapshotUpdateShortcut
     StrCpy $UpdateShortcutExisted 1
   ${EndIf}
   StrCpy $UpdateShortcutCaptured 1
+FunctionEnd
+
+; Snapshot the desktop link independently. A user may have replaced or removed
+; either shortcut, and rollback must restore exactly what existed before the
+; update rather than manufacture the installer's preferred state.
+Function SnapshotUpdateDesktopShortcut
+  StrCpy $UpdateDesktopShortcutCaptured 0
+  StrCpy $UpdateDesktopShortcutExisted 0
+  StrCpy $UpdateDesktopShortcutChanged 0
+  StrCpy $UpdateDesktopShortcutBackup "$TEMP\Sandglass-update-$UpdateParentPid-desktop-shortcut.lnk"
+  ${If} ${FileExists} "$UpdateDesktopShortcutBackup"
+    Return
+  ${EndIf}
+  ${If} ${FileExists} "$DESKTOP\Sandglass.lnk"
+    ClearErrors
+    Rename "$DESKTOP\Sandglass.lnk" "$UpdateDesktopShortcutBackup"
+    ${If} ${Errors}
+      Return
+    ${EndIf}
+    StrCpy $UpdateDesktopShortcutExisted 1
+  ${EndIf}
+  StrCpy $UpdateDesktopShortcutCaptured 1
 FunctionEnd
 
 ; Preserve files that belong to the owner of the install directory. The helper
@@ -930,6 +972,11 @@ Section "Sandglass" SecMain
       StrCpy $UpdatePhase "snapshot-shortcut"
       Call UpdateFailure
     ${EndIf}
+    Call SnapshotUpdateDesktopShortcut
+    ${If} $UpdateDesktopShortcutCaptured != 1
+      StrCpy $UpdatePhase "snapshot-desktop-shortcut"
+      Call UpdateFailure
+    ${EndIf}
   ${EndIf}
   ClearErrors
   CreateDirectory "$SMPROGRAMS\Sandglass"
@@ -951,6 +998,20 @@ Section "Sandglass" SecMain
   ${EndIf}
   ${If} $UpdateMode == 1
     StrCpy $UpdateShortcutChanged 1
+  ${EndIf}
+  ${If} $UpdateMode == 1
+    ; Rollback owns any path CreateShortcut might create, even if the command
+    ; reports an error after leaving partial output behind.
+    StrCpy $UpdateDesktopShortcutChanged 1
+  ${EndIf}
+  ClearErrors
+  CreateShortcut "$DESKTOP\Sandglass.lnk" "$INSTDIR\Sandglass.exe" "" "$INSTDIR\Sandglass.exe"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "create-desktop-shortcut"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
   ${EndIf}
   ClearErrors
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -1116,6 +1177,9 @@ Section "Sandglass" SecMain
     ${If} $UpdateShortcutBackup != ""
       Delete "$UpdateShortcutBackup"
     ${EndIf}
+    ${If} $UpdateDesktopShortcutBackup != ""
+      Delete "$UpdateDesktopShortcutBackup"
+    ${EndIf}
     Delete "$UpdateFailureLog"
   ${ElseIf} ${Silent}
     Exec '"$INSTDIR\Sandglass.exe"'
@@ -1220,6 +1284,7 @@ Section "Uninstall"
 
   Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
   RMDir "$SMPROGRAMS\Sandglass"
+  Delete "$DESKTOP\Sandglass.lnk"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"
   DeleteRegKey HKCU "Software\Sandglass"
   ; Remove only Sandglass's own opt-in login entry.  Leaving it behind would

@@ -292,6 +292,10 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("expected 9", installer_smoke)
         self.assertIn("--self-test", installer_smoke)
         self.assertIn("Get-TreeSnapshot $providerRoot", installer_smoke)
+        self.assertIn("Installer did not create the default desktop shortcut", installer_smoke)
+        self.assertIn("Desktop shortcut does not target the installed Sandglass.exe", installer_smoke)
+        self.assertIn("Uninstall left the Sandglass desktop shortcut behind", installer_smoke)
+        self.assertIn("WScript.Shell", installer_smoke)
         self.assertNotIn("RequireSigned", installer_smoke)
         self.assertNotIn("Get-AuthenticodeSignature", installer_smoke)
         self.assertFalse((ROOT / "tools" / "prepare_signing_request.py").exists())
@@ -399,7 +403,12 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("Restore-RunValue", script)
         self.assertIn("Get-ShortcutState", script)
         self.assertIn("Assert-ShortcutState", script)
+        self.assertIn("Assert-ShortcutTarget", script)
         self.assertIn("original-sandglass.lnk", script)
+        self.assertIn("original-desktop-sandglass.lnk", script)
+        self.assertIn("$updateDesktopShortcutBackupPath", script)
+        self.assertIn("Successful update", script)
+        self.assertIn("Uninstall left the Sandglass desktop shortcut behind", script)
         self.assertIn("Fault-injected update did not restore the Sandglass Run value", script)
         self.assertIn("RegistryValueKind", script)
         self.assertIn("DoNotExpandEnvironmentNames", script)
@@ -1192,6 +1201,7 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         for directive in (
             'CreateDirectory "$SMPROGRAMS\\Sandglass"',
             'CreateShortcut "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"',
+            'CreateShortcut "$DESKTOP\\Sandglass.lnk"',
             'WriteUninstaller "$INSTDIR\\Uninstall.exe"',
             'WriteRegStr HKCU "Software\\Sandglass" "InstallDir"',
             'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass" "DisplayVersion"',
@@ -1218,6 +1228,13 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('Rename "$UpdateShortcutBackup" "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"', failure)
         self.assertIn('$UpdateShortcutDirectoryExisted != 1', failure)
         self.assertIn('RMDir "$SMPROGRAMS\\Sandglass"', failure)
+        self.assertIn('Delete "$DESKTOP\\Sandglass.lnk"', failure)
+        self.assertIn('$UpdateDesktopShortcutCaptured == 1', failure)
+        self.assertIn('$UpdateDesktopShortcutChanged == 1', failure)
+        self.assertIn(
+            'Rename "$UpdateDesktopShortcutBackup" "$DESKTOP\\Sandglass.lnk"',
+            failure,
+        )
         restore = installer.split("Function RestoreUpdateRegistry", 1)[1].split(
             "FunctionEnd", 1
         )[0]
@@ -1405,6 +1422,25 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertLess(shortcut, migration)
         self.assertIn('$UpdateHasInstalled != 1', section)
         self.assertIn('$UpdateOldRunPresent == 1', section)
+
+    def test_desktop_shortcut_is_default_and_follows_install_lifecycle(self):
+        """The visible desktop entry is an installer-owned default, not a smoke fixture."""
+        installer = self._nsi()
+        section = self._section(SECMAIN)
+        uninstall = self._section('Section "Uninstall"')
+        create = 'CreateShortcut "$DESKTOP\\Sandglass.lnk" "$INSTDIR\\Sandglass.exe" "" "$INSTDIR\\Sandglass.exe"'
+        delete = 'Delete "$DESKTOP\\Sandglass.lnk"'
+        self.assertIn(create, section)
+        self.assertIn(delete, uninstall)
+        self.assertIn("Call SnapshotUpdateDesktopShortcut", section)
+        self.assertIn("Function SnapshotUpdateDesktopShortcut", installer)
+
+        # Reintroduce the defect: the desktop link is no longer created. The
+        # contract must fail specifically at the missing default-create step.
+        mutated = section.replace(create, "; desktop shortcut omitted", 1)
+        self.assertNotEqual(mutated, section)
+        with self.assertRaisesRegex(AssertionError, "desktop shortcut"):
+            self.assertIn(create, mutated, "desktop shortcut is not created by default")
 
     def test_portable_update_never_uses_an_empty_install_registry_path(self):
         section = self._section(SECMAIN)

@@ -47,6 +47,9 @@ $smokeRoot = Join-Path $tempBase ("SandglassInstallerSmoke-" + [guid]::NewGuid()
 $installDir = Join-Path $smokeRoot "installed"
 $providerRoot = Join-Path $smokeRoot "providers"
 $sandglassHome = Join-Path $smokeRoot "sandglass-home"
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Sandglass.lnk"
+$desktopShortcutBackup = Join-Path $smokeRoot "original-desktop-Sandglass.lnk"
+$desktopShortcutExisted = Test-Path -LiteralPath $desktopShortcut -PathType Leaf
 
 function Assert-UnderSmokeRoot([string]$Path) {
     $resolved = [System.IO.Path]::GetFullPath($Path)
@@ -153,6 +156,9 @@ Assert-UnderSmokeRoot $installDir
 Assert-UnderSmokeRoot $providerRoot
 Assert-UnderSmokeRoot $sandglassHome
 New-Item -ItemType Directory -Force -Path $installDir, $providerRoot, $sandglassHome | Out-Null
+if ($desktopShortcutExisted) {
+    Copy-Item -LiteralPath $desktopShortcut -Destination $desktopShortcutBackup -Force
+}
 
 $claude = Join-Path $providerRoot "claude"
 $codex = Join-Path $providerRoot "codex"
@@ -188,6 +194,16 @@ try {
     if (-not (Test-Path -LiteralPath $installedExe)) {
         throw "Installed executable is missing."
     }
+    if (-not (Test-Path -LiteralPath $desktopShortcut -PathType Leaf)) {
+        throw "Installer did not create the default desktop shortcut."
+    }
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $installedShortcut = $shortcutShell.CreateShortcut($desktopShortcut)
+    if (-not ([IO.Path]::GetFullPath($installedShortcut.TargetPath)).Equals(
+            [IO.Path]::GetFullPath($installedExe),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Desktop shortcut does not target the installed Sandglass.exe."
+    }
 
     # MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws, so a silent
     # install used to end with nothing running at all: the panel asked for the
@@ -217,6 +233,9 @@ try {
     }
     if ((Get-InstalledSandglassProcesses).Count -eq 0) {
         throw "Installing over a running copy ended with no Sandglass running."
+    }
+    if (-not (Test-Path -LiteralPath $desktopShortcut -PathType Leaf)) {
+        throw "The aborted install removed the desktop shortcut."
     }
 
     $uninstaller = Join-Path $installDir "unins000.exe"
@@ -251,6 +270,9 @@ try {
     if (-not (Test-Path -LiteralPath $uninstallReg)) {
         throw "Uninstall removed its registration while the desktop mutex was held."
     }
+    if (-not (Test-Path -LiteralPath $desktopShortcut -PathType Leaf)) {
+        throw "Uninstall removed the desktop shortcut while the desktop mutex was held."
+    }
 
     Stop-InstalledSandglass
 
@@ -274,6 +296,9 @@ try {
     if (Test-Path -LiteralPath $installedExe) {
         throw "The installed executable remained after uninstall."
     }
+    if (Test-Path -LiteralPath $desktopShortcut) {
+        throw "Uninstall left the Sandglass desktop shortcut behind."
+    }
     Write-Output ("PASS per-user install, post-install launch, running-copy " +
         "abort, running-uninstall abort, packaged self-test, uninstall, " +
         "provider byte invariance")
@@ -288,6 +313,11 @@ finally {
     }
     foreach ($process in Get-InstalledSandglassProcesses) {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($desktopShortcutExisted) {
+        Copy-Item -LiteralPath $desktopShortcutBackup -Destination $desktopShortcut -Force
+    } else {
+        Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
     }
     Assert-UnderSmokeRoot $smokeRoot
     Remove-SmokeRoot

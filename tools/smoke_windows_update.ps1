@@ -41,7 +41,20 @@ function Assert-ShortcutState([string]$Path, [psobject]$Expected, [string]$Label
     if ($actual.Existed -ne $Expected.Existed -or
         $actual.Length -ne $Expected.Length -or
         $actual.SHA256 -ne $Expected.SHA256) {
-        throw "$Label changed the Start Menu shortcut."
+        throw "$Label changed shortcut $Path."
+    }
+}
+
+function Assert-ShortcutTarget([string]$Path, [string]$ExpectedTarget, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label did not create shortcut $Path."
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($Path)
+    if (-not ([IO.Path]::GetFullPath($shortcut.TargetPath)).Equals(
+            [IO.Path]::GetFullPath($ExpectedTarget),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label shortcut $Path targets $($shortcut.TargetPath), expected $ExpectedTarget."
     }
 }
 
@@ -439,6 +452,8 @@ $script:customFile = Join-Path $activeDir "owner-custom\keep-me.txt"
 $script:customEmptyDir = Join-Path $activeDir "owner-custom\empty-directory"
 $script:shortcutPath = Join-Path ([Environment]::GetFolderPath("Programs")) "Sandglass\Sandglass.lnk"
 $script:shortcutOriginalPath = Join-Path $smokeRoot "original-sandglass.lnk"
+$script:desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Sandglass.lnk"
+$script:desktopShortcutOriginalPath = Join-Path $smokeRoot "original-desktop-sandglass.lnk"
 $providerRoot = Join-Path $smokeRoot "providers"
 $sandglassHome = Join-Path $smokeRoot "sandglass-home"
 $claudeRoot = Join-Path $providerRoot "claude"
@@ -454,8 +469,10 @@ $oldUninstallState = [pscustomobject]@{ Known = $false; Existed = $false; Export
 $oldRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
 $installedRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
 $oldShortcutState = $null
+$oldDesktopShortcutState = $null
 $originalShortcutState = $null
 $originalShortcutDirectoryExisted = $false
+$originalDesktopShortcutState = $null
 $oldEnvironment = @{
     CLAUDE_CONFIG_DIR = $env:CLAUDE_CONFIG_DIR
     CODEX_HOME = $env:CODEX_HOME
@@ -471,6 +488,7 @@ $updateReadyEvent = $null
 $updateStagePath = $null
 $updateBackupPath = $null
 $updateShortcutBackupPath = $null
+$updateDesktopShortcutBackupPath = $null
 $customFileHash = $null
 $customTreeSnapshot = $null
 $customUnderInstallDir = $false
@@ -528,6 +546,10 @@ try {
     $originalShortcutDirectoryExisted = Test-Path -LiteralPath (Split-Path -Parent $shortcutPath) -PathType Container
     if ($originalShortcutState.Existed) {
         Copy-Item -LiteralPath $shortcutPath -Destination $shortcutOriginalPath -Force
+    }
+    $originalDesktopShortcutState = Get-ShortcutState $desktopShortcutPath
+    if ($originalDesktopShortcutState.Existed) {
+        Copy-Item -LiteralPath $desktopShortcutPath -Destination $desktopShortcutOriginalPath -Force
     }
     [IO.File]::WriteAllText((Join-Path $claudeRoot ".credentials.json"), '{"fixture":"claude"}')
     [IO.File]::WriteAllText((Join-Path $codexRoot "auth.json"), '{"fixture":"codex"}')
@@ -628,6 +650,11 @@ try {
                 Remove-Item -LiteralPath $shortcutDirectory -ErrorAction SilentlyContinue
             }
         }
+        if ($originalDesktopShortcutState.Existed) {
+            Copy-Item -LiteralPath $desktopShortcutOriginalPath -Destination $desktopShortcutPath -Force
+        } else {
+            Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
+        }
         $runKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
             "Software\Microsoft\Windows\CurrentVersion\Run")
         try {
@@ -644,6 +671,7 @@ try {
     $customFileHash = Get-Sha256 $customFile
     $customTreeSnapshot = Get-TreeSnapshot (Split-Path -Parent $customFile)
     $oldShortcutState = Get-ShortcutState $shortcutPath
+    $oldDesktopShortcutState = Get-ShortcutState $desktopShortcutPath
     Save-RunValue ([ref]$installedRunValueState)
     if ($installedRunValueState.Existed -ne $oldRunValueState.Existed -or
         $installedRunValueState.KeyExisted -ne $oldRunValueState.KeyExisted -or
@@ -661,6 +689,7 @@ try {
     $updateStagePath = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid"
     $updateBackupPath = "$installDir.update-backup"
     $updateShortcutBackupPath = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid-shortcut.lnk"
+    $updateDesktopShortcutBackupPath = Join-Path $env:TEMP "Sandglass-update-$oldPanelPid-desktop-shortcut.lnk"
 
     $oldObserver = Wait-Until {
         $observer = @(Get-ObserverProcessesFromInstall)
@@ -764,6 +793,7 @@ try {
             throw "Fault-injected update did not restore the old build provenance."
         }
         Assert-ShortcutState $shortcutPath $oldShortcutState "Fault-injected update"
+        Assert-ShortcutState $desktopShortcutPath $oldDesktopShortcutState "Fault-injected update"
         $actualRunValueState = [pscustomobject]@{ Known = $false; Existed = $false }
         Save-RunValue ([ref]$actualRunValueState)
         if ($actualRunValueState.Existed -ne $installedRunValueState.Existed -or
@@ -799,6 +829,9 @@ try {
         if ($provenanceValue.build_id -eq $oldProvenance.build_id) {
             throw "Update did not change installed provenance build_id."
         }
+    }
+    if (-not $ExpectRollback) {
+        Assert-ShortcutTarget $desktopShortcutPath (Join-Path $installDir "Sandglass.exe") "Successful update"
     }
     if ($provenanceValue.git_dirty -ne $false) {
         throw "Installed build provenance is not from a clean worktree."
@@ -876,6 +909,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $sandglassHome -PathType Container)) {
         throw "SANDGLASS_HOME was removed by uninstall."
+    }
+    if (Test-Path -LiteralPath $desktopShortcutPath) {
+        throw "Uninstall left the Sandglass desktop shortcut behind."
     }
     if ((Get-TreeSnapshot $providerRoot) -cne $providerBefore) {
         throw "Provider fixtures changed during update, self-test, or uninstall."
@@ -955,6 +991,16 @@ finally {
         } catch { if ($null -eq $failure) { $failure = $_ } }
 
         try {
+            if ($null -ne $originalDesktopShortcutState) {
+                if ($originalDesktopShortcutState.Existed) {
+                    Copy-Item -LiteralPath $desktopShortcutOriginalPath -Destination $desktopShortcutPath -Force
+                } else {
+                    Remove-Item -LiteralPath $desktopShortcutPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch { if ($null -eq $failure) { $failure = $_ } }
+
+        try {
             foreach ($name in $oldEnvironment.Keys) {
                 if ($null -eq $oldEnvironment[$name]) {
                     Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
@@ -991,7 +1037,9 @@ finally {
         # smokeRoot because NSIS stages updates beneath %TEMP% by parent PID.
         try {
             foreach ($residue in @($updateStagePath, $updateBackupPath,
-                                    $updateShortcutBackupPath, $updateFailureLog)) {
+                                    $updateShortcutBackupPath,
+                                    $updateDesktopShortcutBackupPath,
+                                    $updateFailureLog)) {
                 if ($residue -and (Test-Path -LiteralPath $residue)) {
                     Remove-ExactResidue $residue
                 }
