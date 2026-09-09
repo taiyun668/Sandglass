@@ -5,9 +5,9 @@ privacy or correctness boundary.
 
 ## Where this stands, and what to do next (2026-09-09)
 
-The canonical checkout is `D:\Sandglass`. Sandglass `0.1.4` is the completed
-public release. Private base `fa22d668`; public `main` and tag `v0.1.4` resolve
-to `d04b81b`. Main CI run `34387837507` and tag CI run `34388118575` completed
+The canonical checkout is `D:\Sandglass`. Sandglass `0.1.5` is the current full
+public release. Private base `506a12e`; public `main` and tag `v0.1.5` resolve
+to `baea783`. Main CI run `34400241031` and tag CI run `34400542404` completed
 all four jobs successfully. The GitHub Release has five assets; their GitHub
 digests match the downloaded files, and the Owner manifest signature is valid.
 
@@ -22,13 +22,15 @@ maintenance machine and a second Windows machine; a fault injected after the
 new desktop child was created also passed termination, old-version restart,
 old-provenance restoration, residue cleanup, owner-state preservation and
 provider-fixture byte invariance. Both wrappers recorded their own process exit
-code 0. The full suite is 768 tests OK, test isolation exits 0, and a fresh
-Grok-4.6 audit returned ACCEPT.
+code 0. The full suite is 769 tests OK, test isolation exits 0, and a fresh
+Grok-4.6 audit of the uninstall repair returned ACCEPT from a clean detached
+worktree with no tracked, untracked or ignored changes.
 
-The production `v0.1.3` feed offered signed `0.1.4`. Installed `0.1.4` on the
-maintenance machine runs outside the Codex/MSIX shadow from
-`C:\Users\Ayun\AppData\Local\Programs\Sandglass` with real UNC provenance, and
-the current offer is empty.
+The production `v0.1.4` feed offers signed `0.1.5`, with the exact installer
+digest from the tag artifact. The maintenance machine is now running installed
+`0.1.5` outside the Codex/MSIX shadow from
+`C:\Users\Ayun\AppData\Local\Programs\Sandglass`; real UNC provenance reports
+`baea783`, the native bridge has succeeded, and the update offer is empty.
 
 `newhost` / `DESKTOP-7LBHDMT` was measured as Sandglass-clean despite `.codex`
 / `.grok` existing: no Sandglass install, state, process, registry or shortcut
@@ -37,10 +39,26 @@ three manifest hashes and the Owner signature verified, the portable
 `--self-test` returned 0, and a silent standard-user install registered and ran
 the packaged `d04b81b` build without enabling start-at-login. A before/after
 comparison of all 7,719 provider files found zero path, length, mtime or SHA-256
-differences. The SSH-launched desktop was stopped after this mechanical gate.
-Its physical panel/orb/tray interaction, explicit start-at-login opt-in and
-uninstall are still pending. Earlier `v0.1.2` setup and portable candidates ran
-there, and equivalent private `v0.1.3` builds completed install and update. The
+differences. The installed app was then launched in the active console session:
+screenshots prove the real panel and orb were visible; clicking Enable created
+the expected `--background` Run value; minimize hid only the panel; the orb
+restored it; close hid both panel and orb while the process stayed alive; and a
+second launch reactivated the same main PID rather than creating another one.
+
+That acceptance also found a real `0.1.4` defect: silent uninstall while the
+desktop was running returned 0 and removed registration, Run, shortcuts and
+most product files while leaving the processes and a partial install tree. The
+uninstaller's own comment said a loaded PyInstaller image may be renamed, but
+the next lines still used Rename as the running-desktop gate. `b4b2bfe` replaces
+it with a fail-closed desktop mutex check before any deletion. A compiled NSIS
+mutation proves the old Rename gate accepts partial uninstall; the fixed gate
+returns 9 with the entire tree, registration, Run value, shortcut and state
+unchanged. Both the outside build and the exact `0.1.5` package on `newhost`
+passed running-uninstall refusal, stopped uninstall and provider byte invariance.
+The test machine was returned to no Sandglass install, state or process.
+
+Earlier `v0.1.2` setup and portable candidates ran there, and equivalent private
+`v0.1.3` builds completed install and update. The
 exact public `v0.1.3` setup and portable hashes were later rejected before
 process creation by that machine's enforced Smart App Control policy
 (`Code Integrity` 3033/3077, policy `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`).
@@ -49,16 +67,17 @@ compatibility limit; security was not disabled and another rebuild was not used
 to manufacture a green hash. The different public `v0.1.4` hash did not repeat
 that block in the mechanical acceptance.
 
-Physical accessibility, autostart, uninstall and a real provider-state
-transition are not complete.
+The remaining physical checks are the actual notification-area icon/menu,
+keyboard/accessibility paths and a user-driven uninstall dialog. A real
+provider-state transition is also still open.
 
 Read this section, then work the open items in the order given; everything below
 it is the evidence, not a second plan.
 
 Two named audit failures must be interpreted at their capture time rather than
 turned into work automatically. `运行本体一致` is expected only when a running
-product reports an older HEAD than the checkout; the installed `0.1.4` is a
-packaged copy, not the checkout. `codex 开账后归属` is the known ledger gap;
+product reports an older HEAD than the checkout; an installed package is not
+the checkout. `codex 开账后归属` is the known ledger gap;
 the checklist says do not make it green.
 
 **What an agent can advance without the Owner, highest value first:**
