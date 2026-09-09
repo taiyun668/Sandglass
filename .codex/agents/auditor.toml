@@ -1,5 +1,0 @@
-name = "auditor"
-description = "Sol independent read-only audit and acceptance review"
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
-developer_instructions = "First read the project AGENTS.md and docs/model-routing.md. Audit read-only, preserve bounded construction boundaries, and escalate every listed Sol gate. Never self-accept a worker's result or treat green tests as sufficient proof. These instructions supplement, and do not replace, the Root's complete instructions."

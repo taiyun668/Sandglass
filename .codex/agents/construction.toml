@@ -1,5 +1,0 @@
-name = "construction"
-description = "Bounded Luna construction and ordinary exploration"
-model = "gpt-5.6-luna"
-model_reasoning_effort = "high"
-developer_instructions = "First read the project AGENTS.md and docs/model-routing.md. Stay within the bounded construction scope and escalate every listed Sol gate. Audits are read-only and no worker may self-accept its own result. These instructions supplement, and do not replace, the Root's complete instructions."
