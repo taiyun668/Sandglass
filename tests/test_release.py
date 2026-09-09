@@ -1286,6 +1286,58 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('StrCpy $UpdatePhase "parent-exit-timeout"', parent_wait)
         self.assertNotIn("0xFFFFFFFF", parent_wait)
 
+    def test_launch_update_desktop_createprocess_writes_the_register_its_branch_reads(self):
+        """CreateProcessW `.r3` writes $3; the failure branch reads $R3."""
+        launcher = self._nsi().split("Function LaunchUpdateDesktop", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        create = (
+            "CreateProcessW(p 0, t R0, p 0, p 0, i 0, i 0x04000000, "
+            "p 0, p 0, p R1, p R2) i .R3 ? e"
+        )
+        self.assertIn(create, launcher)
+        self.assertIn("${If} $R3 == 0", launcher)
+        self.assertNotIn("i .r3", launcher)
+        mutated = launcher.replace("i .R3 ? e", "i .r3 ? e", 1)
+        self.assertNotEqual(mutated, launcher)
+        with self.assertRaises(AssertionError):
+            self.assertNotIn("i .r3", mutated)
+            self.assertIn(create, mutated)
+
+    def test_stop_failed_update_child_wait_and_terminate_write_the_register_family_their_branches_read(self):
+        """Wait/Terminate `.r0`/`.r1` write $0/$1; the branches read $R0."""
+        stopper = self._nsi().split("Function StopFailedUpdateChild", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        mutations = (
+            (
+                "WaitForSingleObject(p $UpdateChildHandle, i 0) i .R0",
+                "WaitForSingleObject(p $UpdateChildHandle, i 0) i .r0",
+            ),
+            (
+                "WaitForSingleObject(p $UpdateChildHandle, i 15000) i .R0",
+                "WaitForSingleObject(p $UpdateChildHandle, i 15000) i .r0",
+            ),
+            (
+                "TerminateProcess(p $UpdateChildHandle, i 20) i .R1",
+                "TerminateProcess(p $UpdateChildHandle, i 20) i .r1",
+            ),
+        )
+        self.assertIn("${If} $R0 == 258", stopper)
+        self.assertIn("${If} $R0 != 0", stopper)
+        self.assertIn("${ElseIf} $R0 != 0", stopper)
+        self.assertNotIn("i .r0", stopper)
+        self.assertNotIn("i .r1", stopper)
+        for correct, wrong in mutations:
+            with self.subTest(mutation=wrong):
+                self.assertIn(correct, stopper)
+                self.assertNotIn(wrong, stopper)
+                mutated = stopper.replace(correct, wrong, 1)
+                self.assertNotEqual(mutated, stopper)
+                with self.assertRaises(AssertionError):
+                    self.assertNotIn(wrong, mutated)
+                    self.assertIn(correct, mutated)
+
     def test_owner_file_guard_mutation_is_caught(self):
         section = self._section(SECMAIN)
         preserve = section.index('Call PreserveUpdateExtras')

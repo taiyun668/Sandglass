@@ -286,7 +286,9 @@ Function LaunchUpdateDesktop
   System::Call "*(i 68, p 0, p 0, p 0, i 0, i 0, i 0, i 0, i 0, i 0, i 0, i 0, &i2 0, &i2 0, p 0, p 0, p 0, p 0) p .R1"
   System::Call "*(p 0, p 0, i 0, i 0) p .R2"
   ClearErrors
-  System::Call 'kernel32::CreateProcessW(p 0, t R0, p 0, p 0, i 0, i 0x04000000, p 0, p 0, p R1, p R2) i .r3 ? e'
+  ; NSIS register names are case-sensitive: `.r3` writes $3, while the
+  ; failure branch reads $R3.
+  System::Call 'kernel32::CreateProcessW(p 0, t R0, p 0, p 0, i 0, i 0x04000000, p 0, p 0, p R1, p R2) i .R3 ? e'
   Pop $R4
   System::Free $R1
   ${If} $R3 == 0
@@ -306,10 +308,12 @@ Function StopFailedUpdateChild
   ; that the shared mutex is free; otherwise rollback would race a file lock.
   StrCpy $UpdateChildStopOk 1
   ${If} $UpdateChildHandle != ""
-    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .r0'
+    ; NSIS register names are case-sensitive: `.r0` writes $0 and `.r1`
+    ; writes $1, while the wait branches below read $R0.
+    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .R0'
     ${If} $R0 == 258
-      System::Call 'kernel32::TerminateProcess(p $UpdateChildHandle, i 20) i .r1'
-      System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 15000) i .r0'
+      System::Call 'kernel32::TerminateProcess(p $UpdateChildHandle, i 20) i .R1'
+      System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 15000) i .R0'
       ${If} $R0 != 0
         StrCpy $UpdateChildStopOk 0
       ${EndIf}
