@@ -395,7 +395,21 @@ def available_update(force: bool = False) -> dict[str, Any]:
             elapsed = _seconds_since_check(stored)
             if not force and elapsed is not None and elapsed < CHECK_TTL_SECONDS:
                 cached = stored.get("offer")
-                return dict(cached) if isinstance(cached, dict) else {}
+                # Freshness is not enough. A 0.1.1 process writes a 0.1.3
+                # offer; after that install, this 0.1.3 process still sees a
+                # cache inside the TTL whose offer.version is itself. Serving
+                # it again is the stale update badge. Compare against this
+                # module's __version__ on every cached return.
+                if not isinstance(cached, dict):
+                    return {}
+                version = cached.get("version")
+                if isinstance(version, str) and is_newer(version, __version__):
+                    return dict(cached)
+                if cached:
+                    next_state = dict(stored)
+                    next_state["offer"] = {}
+                    _write_state(next_state)
+                return {}
     except (OSError, ValueError, UpdateStateLockError) as exc:
         record_component_failure("update_state_write", exc)
         if force:

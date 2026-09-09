@@ -306,6 +306,141 @@ class CheckStateTests(unittest.TestCase):
                 if not expected_calls:
                     self.assertEqual(offer.get("version"), "9.9.9")
 
+    def _fresh_offer_state(self, offer, **extra):
+        """A still-fresh cache, as left on disk by an older process."""
+        state = {
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "current_version": "0.1.1",
+            "offer": offer,
+            "error": "",
+        }
+        state.update(extra)
+        (self.home / "update-check.json").write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+        return state
+
+    def test_cached_offer_matching_this_process_is_cleared_not_shown(self):
+        """0.1.1 cached a 0.1.3 offer; 0.1.3 must not badge it as available."""
+        pending = {"version": "0.1.3", "notes": "已安装"}
+        self._fresh_offer_state(
+            {"version": "0.1.3", "asset": "cached.exe"},
+            pending_announcement=pending,
+            unrelated={"keep": True},
+        )
+        calls = []
+        with patch.object(update, "__version__", "0.1.3"), patch.object(
+            update, "_get", lambda *a, **k: calls.append(1)
+        ):
+            offer = update.available_update()
+        self.assertEqual(offer, {})
+        self.assertEqual(calls, [])
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["offer"], {})
+        self.assertEqual(stored["pending_announcement"], pending)
+        self.assertEqual(stored["unrelated"], {"keep": True})
+        self.assertEqual(stored["current_version"], "0.1.1")
+
+    def test_older_or_malformed_cached_offers_are_cleared_not_shown(self):
+        pending = {"version": "0.1.3", "notes": "已安装"}
+        cases = (
+            ("older", {"version": "0.1.2", "asset": "old.exe"}),
+            ("empty version", {"version": "", "asset": "empty.exe"}),
+            ("nonsense", {"version": "latest", "asset": "tag.exe"}),
+            ("missing version", {"asset": "no-version.exe"}),
+            ("non-string version", {"version": 13, "asset": "int.exe"}),
+        )
+        for name, cached in cases:
+            with self.subTest(name):
+                self._fresh_offer_state(
+                    cached,
+                    pending_announcement=pending,
+                    unrelated={"keep": name},
+                )
+                calls = []
+                with patch.object(update, "__version__", "0.1.3"), patch.object(
+                    update, "_get", lambda *a, **k: calls.append(1)
+                ):
+                    offer = update.available_update()
+                self.assertEqual(offer, {})
+                self.assertEqual(calls, [])
+                stored = json.loads(
+                    (self.home / "update-check.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(stored["offer"], {})
+                self.assertEqual(stored["pending_announcement"], pending)
+                self.assertEqual(stored["unrelated"], {"keep": name})
+
+    def test_a_newer_cached_offer_is_returned_without_a_network_call(self):
+        cached = {"version": "0.1.4", "asset": "newer.exe", "sha256": "a" * 64}
+        pending = {"version": "0.1.3", "notes": "已安装"}
+        original = self._fresh_offer_state(
+            cached,
+            pending_announcement=pending,
+            unrelated={"keep": True},
+        )
+        calls = []
+        with patch.object(update, "__version__", "0.1.3"), patch.object(
+            update, "_get", lambda *a, **k: calls.append(1)
+        ):
+            offer = update.available_update()
+        self.assertEqual(offer, cached)
+        self.assertIsNot(offer, cached)
+        self.assertEqual(calls, [])
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored, original)
+
+    def test_restoring_unfiltered_cached_return_fails_for_stale_badge(self):
+        """The retired cached return is exactly the stale-badge bug.
+
+        A 0.1.1 process wrote a still-fresh offer.version of 0.1.3. Restoring
+        `return dict(cached) if isinstance(cached, dict) else {}` would show
+        that offer as an update to the process that just became 0.1.3.
+        """
+        import inspect
+
+        cached = {"version": "0.1.3", "asset": "cached.exe"}
+        pending = {"version": "0.1.3", "notes": "已安装"}
+        self._fresh_offer_state(
+            cached,
+            pending_announcement=pending,
+            unrelated={"keep": True},
+        )
+        unfiltered = dict(cached) if isinstance(cached, dict) else {}
+        self.assertEqual(
+            unfiltered.get("version"),
+            "0.1.3",
+            "the unfiltered cached return is the stale-badge reason",
+        )
+
+        source = inspect.getsource(update.available_update)
+        retired = "return dict(cached) if isinstance(cached, dict) else {}"
+        self.assertNotIn(retired, source)
+        self.assertIn("is_newer(version, __version__)", source)
+
+        calls = []
+        with patch.object(update, "__version__", "0.1.3"), patch.object(
+            update, "_get", lambda *a, **k: calls.append(1)
+        ):
+            offer = update.available_update()
+        self.assertEqual(offer, {})
+        self.assertEqual(calls, [])
+        stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["offer"], {})
+        self.assertEqual(stored["pending_announcement"], pending)
+        self.assertEqual(stored["unrelated"], {"keep": True})
+        mutated = source.replace(
+            "if isinstance(version, str) and is_newer(version, __version__):\n"
+            "                    return dict(cached)",
+            retired,
+            1,
+        )
+        self.assertNotEqual(mutated, source)
+        self.assertIn(retired, mutated)
+        with self.assertRaises(AssertionError):
+            self.assertNotIn(retired, mutated)
+            self.assertIn("is_newer(version, __version__)", mutated)
+
     def test_the_unusable_monotonic_stamp_is_no_longer_written(self):
         with patch.object(update, "_get", side_effect=OSError("404")):
             update.available_update(force=True)
