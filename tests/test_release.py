@@ -265,7 +265,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         # install directory.
         uninstall = installer.split('Section "Uninstall"', 1)[1]
         rename_probe = uninstall.split(
-            'Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"', 1
+            r'Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"', 1
         )[1].split('Abort', 1)[0]
         self.assertIn("SetErrorLevel 9", rename_probe)
         self.assertNotIn('RMDir /r "$INSTDIR"', uninstall)
