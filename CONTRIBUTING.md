@@ -6,8 +6,8 @@ truthful local records out.
 
 ## Before changing code
 
-Read [`AGENTS.md`](AGENTS.md) and the
-[`provider source map`](docs/provider-source-map.md). Determine which provider
+Read the [`provider source map`](docs/provider-source-map.md) and the public
+[`privacy boundary`](PRIVACY.md). Determine which provider
 record directly proves the fact being added. Current-login state, quota percentage,
 time proximity and a third-party account manager are not historical ownership
 evidence.

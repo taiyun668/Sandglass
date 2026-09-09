@@ -111,7 +111,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         font = WEB_DIR / "fonts" / "Geist-Variable.woff2"
         license_path = font.parent / "LICENSE-Geist.txt"
         license_text = license_path.read_text(encoding="utf-8")
-        provenance = (ROOT / "docs" / "release-provenance-audit.md").read_text(encoding="utf-8")
+        provenance = (ROOT / "docs" / "dependency-provenance.md").read_text(encoding="utf-8")
 
         self.assertIn("SIL OPEN FONT LICENSE Version 1.1", license_text)
         self.assertEqual(
@@ -132,7 +132,7 @@ class ReleaseMetadataTests(unittest.TestCase):
 
     def test_proxy_tools_keeps_the_exact_reviewed_upstream_license(self):
         license_path = ROOT / "packaging" / "licenses" / "proxy_tools-LICENSE.txt"
-        provenance = (ROOT / "docs" / "release-provenance-audit.md").read_text(
+        provenance = (ROOT / "docs" / "dependency-provenance.md").read_text(
             encoding="utf-8"
         )
 

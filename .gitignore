@@ -9,3 +9,14 @@ dist/
 build/
 .sandglass/
 tools/__pycache__/
+
+# Maintainer-local agent configuration is not part of the public source tree.
+/.claude/
+/.codex/
+/AGENTS.md
+/CLAUDE.md
+/docs/model-routing.md
+/docs/release-checklist.md
+/docs/release-provenance-audit.md
+/docs/adapter-clean-room-experiment.md
+/docs/adapter-deep-holdout-results-2026-08-31.md

@@ -48,6 +48,6 @@ the same redacted status is available from `sandglass doctor` and
 
 If policy blocks the main Sandglass executable before it starts, Sandglass cannot
 display its own diagnostic. That case must be identified from the Windows policy
-event or installer log. Signed-installer acceptance and policy-specific clean-machine
-tests remain release work tracked in
-[`docs/release-checklist.md`](docs/release-checklist.md).
+event or installer log. The release and update trust boundary is documented in
+[`docs/release-integrity.md`](docs/release-integrity.md). Compatibility failures
+that do not contain private account data may be reported as a public issue.

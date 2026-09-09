@@ -17,6 +17,25 @@ jobs:
         python-version: ["3.12", "3.13.15"]
     steps:
       - uses: actions/checkout@v6
+      - name: Reject maintainer-only development files
+        shell: pwsh
+        run: |
+          $forbidden = @(
+            ".claude",
+            ".codex",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/model-routing.md",
+            "docs/release-checklist.md",
+            "docs/release-provenance-audit.md",
+            "docs/adapter-clean-room-experiment.md",
+            "docs/adapter-deep-holdout-results-2026-08-31.md",
+            "docs/handoff-2026-09-02.md"
+          )
+          $present = @($forbidden | Where-Object { Test-Path -LiteralPath $_ })
+          if ($present.Count) {
+            throw "Maintainer-only files reached the public tree: $($present -join ', ')"
+          }
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
