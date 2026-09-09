@@ -1,88 +1,133 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # Sandglass
 
-一个只读的本地 AI 用量仪表盘。Sandglass 自动发现本机的模型工具和账号，统一展示 Token 消耗、官方套餐余量与重置时间。
+A read-only local AI usage dashboard. Sandglass discovers model tools and
+accounts on this computer and shows Token usage, official plan remaining quota,
+and reset times in one place.
 
-数据留在本机，不上传；Sandglass 不切换账号、不刷新凭据，也不修改厂商目录。
+Data stays on this computer and is not uploaded. Sandglass does not switch
+accounts, refresh credentials, or modify provider directories.
 
-> **观测从 Sandglass 介入后开始形成完整证据链。** 安装前的历史只有在官方本机
-> 信源能够直接证明时才会归属到账号；证明不了的部分会如实保持未归属，不会按
-> 当前登录账号倒推过去。
+**[Latest GitHub Release](https://github.com/taiyun668/Sandglass/releases/latest)**
 
-首次使用必须选择一种账本路径：选择单账号、只用官方工具后，Sandglass 会把每个平台
-监测到的官方本机用量归到该平台当前账号；扫描到旧账号不会擅自改变用户的选择。只要涉及
-多账号、多工具、账号切换，或需要重建、补齐、更新账本，也可以选择 Adapter Skill 路径。
-后一种路径不会抹掉已有直接证据：能够证明账号的本机 Token 仍正常归属，只有证据缺口
-等待 skill 补齐。两种模式都只在读取时生效，不改写缓存或身份账本，切换后可完整回退。
-从菜单进入“账号与工具模式”后也可以返回而不保存；只有明确点选另一个模式才会改变读取视图。
+> **A complete evidence chain starts only after Sandglass begins observing.**
+> History from before install is attributed to an account only when an official
+> local source can prove it directly. Anything that cannot be proved stays
+> unassigned as-is. Sandglass does not backfill that history from the currently
+> signed-in account.
 
-## 当前支持
+On first use you must choose a ledger path. After you choose one account and
+official tools only, Sandglass attributes each platform's observed official
+local usage to that platform's current account. Discovering older accounts does
+not change that choice on its own. Whenever multiple accounts, multiple tools,
+account switching, or rebuilding, completing, or updating the ledger are
+involved, you can also choose the Adapter Skill path. That path does not erase
+existing direct evidence: local Token that already proves an account remains
+attributed; only evidence gaps wait for the skill to complete. Both modes take
+effect at read time only. They do not rewrite the cache or the identity ledger,
+and switching modes fully restores the previous view. Opening **Account and
+tool mode** from the menu also lets you leave without saving; the read view
+changes only when you explicitly select the other mode.
 
-| 厂商 | 本机消耗 | 本机账号发现 | 官方余量 |
+## Currently supported
+
+| Provider | Local usage | Local account discovery | Official remaining quota |
 | --- | --- | --- | --- |
-| Claude | Claude Code 会话日志 | Claude 配置目录 | 5 小时、7 天及模型窗口 |
-| Codex | CLI / Desktop rollout 日志 | 官方当前登录资料及 Sandglass 开始运行后的观测记录 | 5 小时、7 天及 credits |
-| Grok | Grok CLI `turn_completed` | 官方 Grok Build CLI 当前登录资料、官方身份事件及 Sandglass 持久身份账本 | 周期额度与产品窗口 |
+| Claude | Claude Code session logs | Claude config directory | 5-hour, 7-day, and model windows |
+| Codex | CLI / Desktop rollout logs | Official current sign-in data plus observations recorded after Sandglass starts running | 5-hour, 7-day, and credits |
+| Grok | Grok CLI `turn_completed` | Official Grok Build CLI current sign-in data, official identity events, and Sandglass's persistent identity ledger | Period quota and product windows |
 
-“自动发现所有账号”指所有受支持厂商在本机留下可识别登录资料的账号。未登录、未落地到本机，或厂商没有提供日志/额度信源的账号无法被推断。
+“Automatically discover all accounts” means accounts from supported providers
+that have left recognizable sign-in data on this computer. Accounts that are
+signed out, never landed on this computer, or have no provider log or quota
+source cannot be inferred.
 
-Sandglass 公众版不读取 `~/.codex/accounts/registry.json`、社区 `grok-app` 或其他第三方账号工具的数据。Codex 由 Sandglass 从介入后持续记录官方登录变化；Grok 还会合并官方 CLI 自己写下的身份事件。身份账本决定哪些历史账号存在，邮箱、套餐等元数据只负责补充显示。
+The public Sandglass build does not read `~/.codex/accounts/registry.json`,
+community `grok-app`, or other third-party account-tool data. For Codex,
+Sandglass continuously records official sign-in changes after it starts
+observing. For Grok, it also merges identity events written by the official CLI
+itself. The identity ledger decides which historical accounts exist; metadata
+such as email and plan only supplements display.
 
-### 能看到什么
+### What you can see
 
-| 能看到 | 看不到 |
+| Visible | Not visible |
 | --- | --- |
-| 受支持官方客户端写在这台电脑上的 Token 用量 | 其他设备上没有同步到本机官方日志的用量 |
-| 官方本机登录资料能够证明的账号与身份变化 | 未登录、仅存在云端或未在本机留下官方资料的账号 |
-| 厂商账号级官方余量和重置时间；其中可能包含其他设备 | 默认未接入的第三方工具、纯网页聊天或需要解密进程流量才能观察的活动 |
-| 用户显式接入的本机来源；Sandglass 会原样收下并标出认识与不认识的字段 | 用户来源没有直接提供的事实；Sandglass 不会用现有三家模型替用户裁决未知数据 |
-| 官方客户端在本机记下的那些调用 | **官方客户端没有记下的那些**：厂商完成了一次调用却没有写进本机会话文件时，这台电脑上没有任何东西证明它发生过 |
+| Token usage written on this computer by supported official clients | Usage on other devices that was not synced into official local logs |
+| Accounts and identity changes that official local sign-in data can prove | Accounts that are signed out, exist only in the cloud, or left no official local records |
+| Provider account-level official remaining quota and reset times, which may include other devices | Third-party tools not connected by default, web-only chat, or activity that would require decrypting process traffic |
+| Local sources the user explicitly connects; Sandglass accepts them as-is and marks recognized and unrecognized fields | Facts the user source did not provide directly; Sandglass will not use the three existing providers to adjudicate unknown data for the user |
+| Calls the official client recorded locally | **Calls the official client did not record**: if the provider completed a call but did not write it into the local session file, nothing on this computer proves it happened |
 
-最后一行不是假设。2026-09-07 在这台机器上量到过一次：厂商自己的 OTLP 事件流里有一次
-已完成的调用，而同一个会话的本机记录文件里没有它的任何痕迹——不是记到了别的时间，是根本
-不存在。**所以本机总量的下界是可信的，上界不是。** 这也是 Sandglass 支持接收官方 OTLP
-的原因之一：它是本机唯一能看见这种遗漏的旁证。
+The last row is not a hypothesis. On 2026-09-07 this machine measured a case
+where the provider's own OTLP event stream contained a completed call, and the
+same session's local record file had no trace of it — not recorded at another
+time, simply absent. **Local totals are therefore a trustworthy lower bound,
+not an upper bound.** That is one reason Sandglass can receive official OTLP:
+it is the only local corroboration that can see this kind of omission.
 
-Sandglass 是本机观测仪表盘，不是计费、成本核算或发票对账工具。
+Sandglass is a local observation dashboard, not a billing, cost-accounting, or
+invoice-reconciliation tool.
 
-## 信源
+## Sources
 
-Sandglass 按以下顺序相信数据：
+Sandglass trusts data in this order:
 
-1. 官方客户端写下的逐轮会话日志；
-2. 官方客户端的账号注册表和认证事件；
-3. 厂商第一方额度接口；
-4. Sandglass 自己记录的观测时间与账号归属台账。
+1. Per-turn session logs written by the official client;
+2. The official client's account registry and authentication events;
+3. The provider's first-party quota endpoint;
+4. Observation timestamps and account-attribution ledgers recorded by Sandglass itself.
 
-本地日志和额度地址属于第一方客户端/服务信源，但不一定是厂商承诺长期稳定的公开 API。某个额度接口失效时，本机消耗仍可统计，面板会把余量标成暂不可用，不会猜数。
+Local logs and quota endpoints are first-party client/service sources, but they
+are not necessarily public APIs the provider commits to keep stable. If a quota
+endpoint fails, local usage can still be counted; the dashboard marks remaining
+quota as temporarily unavailable and does not guess numbers.
 
-Sandglass 已开始持续监测 Grok 账号的官方额度、重置时间和本机用量归属。开始观测前若没有可验证的账号登录或切换事件，早期用量将统一显示为“未归属”，不会按当前登录账号猜测或补填。
+Sandglass now continuously monitors Grok accounts' official quota, reset times,
+and local usage attribution. If there is no verifiable account sign-in or switch
+event before observation starts, earlier usage is shown uniformly as Unassigned.
+Sandglass does not guess or backfill it from the currently signed-in account.
 
-三家官方 OTel、本机日志、身份事件、额度接口与第三方适配器的证据等级见
-[`docs/provider-source-map.md`](docs/provider-source-map.md)。
-官方发布包只内置经过项目验证的信源。多账号、多工具或需要重建、补齐、更新账本时，
-用户按
-[`docs/custom-source-contract.md`](docs/custom-source-contract.md) 显式接入其他本机来源；
-这类数据始终标成用户适配器证据，不冒充官方账号、额度或重置状态。
-完整适配机制可在 [`skills/sandglass-adapter/`](skills/sandglass-adapter/) 取得并交给
-本机编码 agent；其中 `SKILL.md` 负责工作流与边界，`references/` 按需提供重建知识，
-`scripts/` 只承载确定性操作。agent 会先探测这台机器实际使用的工具和直接信源，再把
-原始形状送进独立收件箱；Sandglass 的镜子会说明认识了什么、没认识什么以及当前使用
-阶段。收到数据本身不会改动账号或合计；用户明确关联账号后，只有与本机第一方记录
-在厂商、会话、UTC 分钟及全部 Token 桶上精确一致的分钟才会补充账号归属，不新增
-Token，取消关联即可撤销。对本机不存在且无跨会话、跨来源碰撞的分钟，用户可另行选择
-计入总量，来源会跟随每个受影响数字，关闭即可撤销。关联账号并产生已接纳证据后，
-用户还可单独授权这些证据参与满窗推导；推导值会持续标出全部用户来源，撤销授权只停止推导，
-不改变已经接纳的 Token。所有适配数据都不写入
-`cache.sqlite`。Sandglass 不会自动下载或运行适配器。
-`/api/quota` 的 `providers` 字段会把账号发现、本机用量和官方额度三项能力
-分别声明；没有发现账号的平台也不会从能力状态中消失。
+Evidence grades for official OTel from the three providers, local logs, identity
+events, quota endpoints, and third-party adapters are in
+[`docs/provider-source-map.md`](docs/provider-source-map.md).
+Official release packages bundle only sources the project has verified. For
+multiple accounts, multiple tools, or rebuilding, completing, or updating the
+ledger, users explicitly connect other local sources per
+[`docs/custom-source-contract.md`](docs/custom-source-contract.md);
+that data is always labeled user-adapter evidence and is never presented as
+official account, quota, or reset state.
+The full adapter mechanism is available in
+[`skills/sandglass-adapter/`](skills/sandglass-adapter/)
+for a local coding agent; `SKILL.md` owns the workflow and boundaries,
+`references/` supplies reconstruction knowledge on demand, and `scripts/`
+carries only deterministic operations. The agent first probes the tools and
+direct sources this machine actually uses, then sends native shapes into an
+independent inbox. Sandglass's mirror reports what it recognized, what it did
+not, and the current product-use stage. Receiving data itself does not change
+accounts or totals. After the user explicitly maps an account, only minutes that
+match first-party local records exactly on provider, session, UTC minute, and
+every Token bucket receive account attribution; Token is not added. Unmapping
+reverses the change. For minutes that do not exist locally and have no
+cross-session or cross-source collision, the user may separately choose to
+include them in totals; the source follows every affected number, and turning
+that off reverses it. After mapping an account produces admitted evidence, the
+user may separately authorize that evidence for full-window inference. Derived
+values continue to name every user source; revoking authorization only stops
+inference and does not change already-admitted Token. No adapter data is written
+to `cache.sqlite`. Sandglass does not automatically download or run adapters.
+The `providers` field of `/api/quota` declares account discovery, local usage,
+and official quota as separate capabilities. A platform with no discovered
+account does not disappear from capability state.
 
-公开协作与发布边界见 [`PRIVACY.md`](PRIVACY.md)、[`SECURITY.md`](SECURITY.md)、
-[`SUPPORT.md`](SUPPORT.md) 和 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+Public collaboration and release boundaries are in
+[`PRIVACY.md`](PRIVACY.md), [`SECURITY.md`](SECURITY.md),
+[`SUPPORT.md`](SUPPORT.md), and [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## 只读边界
+## Read-only boundary
 
-Sandglass 只读取厂商目录：
+Sandglass only reads provider directories:
 
 ```text
 ~/.claude
@@ -90,22 +135,29 @@ Sandglass 只读取厂商目录：
 ~/.grok
 ```
 
-登录过期时，Sandglass 只提示用户回到对应官方客户端重新登录。它不会用 refresh token 换取新凭据，也不会回写 `auth.json` 或 `.credentials.json`。
+When sign-in expires, Sandglass only prompts the user to sign in again with the
+corresponding official client. It does not exchange a refresh token for new
+credentials, and it does not write back `auth.json` or `.credentials.json`.
 
-Sandglass 自己的缓存、额度快照和归属台账写在 `%LOCALAPPDATA%\sandglass`；可用 `SANDGLASS_HOME` 改到其他位置。
+Sandglass writes its own cache, quota snapshots, and attribution ledger under
+`%LOCALAPPDATA%\sandglass`. `SANDGLASS_HOME` can move that location.
 
-## 运行
+## Running
 
-需要 Python 3.12+。核心仅额外依赖 OpenTelemetry 官方生成的 protobuf
-消息类型，用于接收厂商客户端主动发送的 OTLP 日志。
+Python 3.12+ is required. The core's only extra dependency is OpenTelemetry's
+officially generated protobuf message types, used to receive OTLP logs that
+provider clients send of their own accord.
 
-Windows x64 unsigned 版本可从
+The unsigned Windows x64 build can be downloaded from
 [GitHub Releases](https://github.com/taiyun668/Sandglass/releases)
-下载 per-user 安装包和 portable ZIP。首次运行时 Windows 通常会要求确认；预览版不是稳定版，
-随包的可执行文件仍未做 Authenticode 签名。启用 Smart App Control 的 Windows 可能直接
-拦截 unsigned setup；这时不要关闭系统安全策略，该机器只能尝试 portable ZIP。
-后续更新只有在下载内容与带维护者签名的
-`SHA256SUMS.windows` 清单匹配后才会交给安装器。仍可从源码 checkout 运行：
+as a per-user installer and a portable ZIP. Windows usually asks for
+confirmation on first run. Preview builds are not stable releases, and the
+shipped executables are still not Authenticode-signed. Windows with Smart App
+Control enabled may block the unsigned setup outright. In that case do not turn
+off system security policy; that machine can only try the portable ZIP.
+Later updates are handed to the installer only after the download matches the
+maintainer-signed `SHA256SUMS.windows` manifest. You can still run from a source
+checkout:
 
 ```console
 python -m pip install -e .
@@ -116,49 +168,66 @@ python -m sandglass accounts
 python -m sandglass serve --no-browser
 ```
 
-显式运行 `sandglass serve` 时，浏览器面板默认位于
-`http://127.0.0.1:7740`。原生 Windows 面板直接在桌面进程内加载页面和数据，
-默认不为面板监听本机端口。
+When `sandglass serve` is invoked explicitly, the browser dashboard defaults to
+`http://127.0.0.1:7740`. The native Windows dashboard loads pages and data
+inside the desktop process and does not listen on a local port for the dashboard
+by default.
 
-`sandglass serve` 的 HTTP 接口只接受回环地址，但不做客户端认证；同一台电脑上以
-当前用户身份运行的其他进程可以读取浏览器面板所需的账号、额度与报告数据。原生
-桌面面板不开放这些接口。
+The HTTP interface of `sandglass serve` accepts loopback addresses only, but it
+does not authenticate clients. Other processes running as the current user on
+the same computer can read the account, quota, and report data the browser
+dashboard needs. The native desktop dashboard does not expose these interfaces.
 
-桌面壳已内置面板与采集器，不需要同时运行 `sandglass serve`。若桌面端已显式开启
-占用 `127.0.0.1:7740` 的精确监测接收器，也不要再让 `serve` 使用同一端口；只需临时
-查看浏览器面板时可改用例如 `sandglass serve --port 7742 --no-browser`。
+The desktop shell already includes the dashboard and collector; you do not need
+to run `sandglass serve` at the same time. If the desktop has already explicitly
+enabled the precise-monitoring receiver occupying `127.0.0.1:7740`, do not also
+let `serve` use the same port. To view the browser dashboard temporarily, use
+for example `sandglass serve --port 7742 --no-browser`.
 
-普通 wheel 未附带构建期下载的 WebView2 WPF 程序集，因此会回退到
-pywebview。正式 Windows 发布工件会另外组装经过版本固定和溯源检查的微软
-运行时，以保留原生面板动画。
+A regular wheel does not include the WebView2 WPF assemblies downloaded at build
+time, so it falls back to pywebview. Official Windows release artifacts
+separately assemble a version-pinned, provenance-checked Microsoft runtime so
+native dashboard animation is preserved.
 
-原生界面组件被 Windows 应用控制策略拦截或无法加载时，Sandglass 会回退到
-兼容界面，并将脱敏后的组件状态写在自己的数据目录中；这不会显示成账号掉线。
-可用 `sandglass doctor` 或 `/api/runtime-diagnostics` 查看状态。若主程序在启动前
-就被策略拦截，则只能从 Windows 策略事件或安装日志判断，因为程序本身尚未运行。
+When native UI components are blocked by Windows application-control policy or
+fail to load, Sandglass falls back to a compatible UI and writes redacted
+component status in its own data directory. That is not shown as an account
+sign-out. Use `sandglass doctor` or `/api/runtime-diagnostics` to inspect the
+status. If policy blocks the main executable before it starts, the only way to
+tell is from Windows policy events or install logs, because the program itself
+is not running yet.
 
-### 精确监测（可选，实验性）
+### Precise monitoring (optional, experimental)
 
-Sandglass 可在 `http://127.0.0.1:7740/v1/logs` 提供 OTLP/HTTP protobuf
-接收地址。原生桌面版默认关闭该端口；用户复制精确监测命令时才显式启用，
-此时该端口只接受 `/v1/logs`，不会提供面板、账号、额度或报告 API。
-显式运行 `sandglass serve` 时，接收路由随该本机浏览器服务启用。接收器只保留账号标识、会话标识、时间、模型和
-Token 计数；提示词、工具输入输出和文件路径在入库前丢弃，原始 OTLP 包不落盘。
+Sandglass can provide an OTLP/HTTP protobuf receive endpoint at
+`http://127.0.0.1:7740/v1/logs`. The native desktop build keeps that port off by
+default; it is enabled only when the user copies a precise-monitoring command.
+In that mode the port accepts only `/v1/logs` and does not serve dashboard,
+account, quota, or report APIs. When `sandglass serve` is invoked explicitly,
+the receive route is enabled with that local browser service. The receiver keeps
+only account identifiers, session identifiers, time, model, and Token counts.
+Prompts, tool input/output, and file paths are discarded before storage; raw
+OTLP packets are not written to disk.
 
-这条能力目前是独立证据账本，尚未替换概览页的原有统计。Claude、Codex 和
-Grok 的官方遥测都需要用户在对应客户端启动前主动启用；Sandglass 不会改写
-厂商配置。启用之前或接收器未运行期间不会生成这类证据，缺口不会按当前账号
-反向补填。各平台页会区分尚未收到事件、官方客户端已经连接但尚无用量、仅收到
-无身份用量，以及已经收到官方账号证据；这些状态只说明账本中实际存在什么。
-点击状态可复制该平台官方支持的单次 PowerShell 启动命令，该命令只影响新启动的
-客户端进程，不会修改厂商配置。实验账本仍不会重复加进现有总量。具体信源和
-验收状态见
-[`docs/provider-source-map.md`](docs/provider-source-map.md)。
+This capability is currently an independent evidence ledger and has not replaced
+the overview page's existing totals. Official telemetry for Claude, Codex, and
+Grok must be enabled by the user before the corresponding client starts;
+Sandglass does not rewrite provider configuration. Evidence of this kind is not
+created before enablement or while the receiver is not running, and gaps are
+not backfilled from the current account. Each platform page distinguishes: no
+events received yet; official client connected but no usage yet; usage received
+without identity; and official account evidence received. These states only
+describe what actually exists in the ledger. Clicking a status copies that
+platform's officially supported one-shot PowerShell launch command. The command
+affects only newly started client processes and does not modify provider
+configuration. The experimental ledger is still not added into existing totals.
+Source details and acceptance status are in
+[`docs/provider-source-map.md`](docs/provider-source-map.md).
 
-### Windows 桌面壳
+### Windows desktop shell
 
-桌面版保留悬浮球、面板和托盘。开发目录中先安装桌面依赖，并准备官方
-WebView2 WPF 运行库：
+The desktop build keeps the floating orb, dashboard, and tray. In a development
+tree, install desktop extras and prepare the official WebView2 WPF runtime:
 
 ```powershell
 pip install -e ".[desktop]"
@@ -166,33 +235,36 @@ powershell -ExecutionPolicy Bypass -File tools/build_native_shell.ps1
 pythonw sandglass-desktop.pyw
 ```
 
-面板在 `pythonw` 进程内使用 WPF 的 `WebView2CompositionControl`，让它从
-悬浮球的原位连续展开和收回；WebView 始终保持最终尺寸，动画不会逐帧触发
-网页重排，也不需要运行 Sandglass 自行编译的未签名 EXE。未准备运行库时会
-回退到 pywebview。悬浮球仍由 Win32 分层窗口实现。不开启
-“开机启动”就不会写入注册表。
+The dashboard uses WPF `WebView2CompositionControl` inside the `pythonw`
+process so it expands and collapses continuously from the orb's original
+position. The WebView stays at its final size; animation does not trigger
+per-frame page reflow, and there is no need to run an unsigned EXE compiled by
+Sandglass itself. Without the runtime prepared, it falls back to pywebview. The
+orb is still a Win32 layered window. The registry is not written unless
+**Start at login** is enabled.
 
-### 平台支持
+### Platform support
 
-| 部分 | 当前范围 |
+| Part | Current scope |
 | --- | --- |
-| 核心 CLI 与浏览器面板 | 以 Python 3.12+ 的 Windows、macOS、Linux 为目标；实际可见内容仍取决于相应官方客户端是否在本机写下受支持信源 |
-| 悬浮球、托盘和原生桌面面板 | Windows x64 |
-| 当前发布与干净机器验收 | Windows x64；macOS 与 Linux 桌面工件尚未验收 |
+| Core CLI and browser dashboard | Targeted at Windows, macOS, and Linux with Python 3.12+; what is actually visible still depends on whether the corresponding official client wrote supported sources on this computer |
+| Floating orb, tray, and native desktop dashboard | Windows x64 |
+| Current release and clean-machine acceptance | Windows x64; macOS and Linux desktop artifacts have not been accepted yet |
 
-## 数据口径
+## Metrics
 
-- **消耗**：`total_tokens`，用于本机窗口统计。
-- **产出**：`output_tokens`，其中已经包含 reasoning，不重复相加。
-- **额度条**：厂商返回的账号级 `used_percent`，可能包含其他设备。
+- **Usage**: `total_tokens`, used for local window statistics.
+- **Output**: `output_tokens`, which already includes reasoning and is not added again.
+- **Quota bar**: account-level `used_percent` returned by the provider, which may include other devices.
 
-这些数值用于解释本机活动和官方账号余量，不能替代厂商账单，也不应用于费用或
-发票对账。
+These numbers explain local activity and official account remaining quota. They
+do not replace the provider's bill and must not be used for cost or invoice
+reconciliation.
 
-## 开发验证
+## Development checks
 
-Windows 上的完整测试会校验固定版本的官方 WebView2 WPF 文件。第一次运行前先
-准备该运行库，再执行测试：
+Full tests on Windows verify pinned official WebView2 WPF files. Prepare that
+runtime before the first run, then run tests:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/build_native_shell.ps1
@@ -200,11 +272,14 @@ python -m unittest discover -s tests
 $env:PYTHONUTF8='1'; python -m tools.audit
 ```
 
-Windows CI 还会构建 wheel、安装到空虚拟环境，并从源码目录外执行
-`tests/smoke_installed.py`。该门槛使用通用的官方客户端目录夹具验证三家当前
-账号发现、第三方 Codex/社区 Grok 数据隔离及厂商目录逐字节不变。
+Windows CI also builds a wheel, installs it into an empty virtual environment,
+and runs `tests/smoke_installed.py` from outside the source tree. That gate uses
+generic official-client directory fixtures to verify current-account discovery
+for all three providers, isolation from third-party Codex / community Grok data,
+and byte-for-byte invariance of provider directories.
 
-Windows 安装包和便携版使用同一份自包含桌面目录构建。内部候选可运行：
+Windows installer and portable builds use the same self-contained desktop
+directory. Internal candidates can run:
 
 ```powershell
 python -m pip install -r tools/wheel-build-requirements.txt
@@ -212,12 +287,15 @@ python -m pip install -r tools/windows-release-requirements.txt
 .\tools\build_windows_release.ps1 -NsisCompiler C:\path\to\makensis.exe
 ```
 
-脚本输出明确带 `unsigned` 的 per-user NSIS 安装包、portable ZIP 和
-CycloneDX runtime SBOM，并统一写入 `SHA256SUMS.windows`。当前公开的
-预览版明确标为 `unsigned`；是否进入稳定通道由实际安装、更新和卸载验收决定，
-不等待第三方代码签名服务。
+The script writes a per-user NSIS installer, portable ZIP, and CycloneDX runtime
+SBOM that are explicitly labeled `unsigned`, and records them together in
+`SHA256SUMS.windows`. The current public preview is explicitly labeled
+`unsigned`. Whether it enters a stable channel is decided by actual install,
+update, and uninstall acceptance, not by waiting for a third-party code-signing
+service.
 
-修改解析逻辑时必须同步提升 `sandglass.models.RECORD_FORMAT`，避免旧缓存继续返回旧语义。
+Parser changes must increment `sandglass.models.RECORD_FORMAT` at the same time
+so old caches do not keep returning old semantics.
 
 ## Release and update integrity
 
@@ -243,8 +321,11 @@ Windows binaries are built from this repository's public `main` branch on
 GitHub-hosted Actions runners. The release and updater trust sequence is
 documented in [`docs/release-integrity.md`](docs/release-integrity.md).
 
-## 许可证
+## License
 
-Sandglass 源代码采用 [MIT License](LICENSE)。内置 Geist 字体继续采用
-[SIL Open Font License 1.1](sandglass/web/fonts/LICENSE-Geist.txt)。界面中的
-厂商名称和手绘识别图标仅用于说明兼容对象，不代表与对应厂商存在隶属或背书关系。
+Sandglass source code is under the [MIT License](LICENSE). Bundled Geist fonts
+remain under the
+[SIL Open Font License 1.1](sandglass/web/fonts/LICENSE-Geist.txt).
+Provider names and hand-drawn recognition icons in the UI are used only to
+identify compatible products and do not imply affiliation or endorsement by
+those providers.
