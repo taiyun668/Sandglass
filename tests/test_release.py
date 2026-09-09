@@ -1235,6 +1235,14 @@ class RunningInstallLifecycleTests(unittest.TestCase):
             "WaitForMultipleObjects(i 2, p R0, i 0, i 120000) i .r1",
             installer,
         )
+        self.assertIn(
+            "WaitForSingleObject(p $UpdateChildHandle, i 0) i .R2",
+            installer,
+        )
+        self.assertNotIn(
+            "WaitForSingleObject(p $UpdateChildHandle, i 0) i .r2",
+            installer,
+        )
         self.assertIn("ready-wait-$R1-e$R2", installer)
         launch = section.index('Call LaunchUpdateDesktop')
         wait = section.index('Call WaitForUpdateReady', launch)

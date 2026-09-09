@@ -356,7 +356,7 @@ Function WaitForUpdateReady
   ${If} $R1 == 0
     ; If the event and child became signaled together, the lower array index
     ; wins. Require the exact desktop process to still be alive at readiness.
-    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .r2'
+    System::Call 'kernel32::WaitForSingleObject(p $UpdateChildHandle, i 0) i .R2'
     ${If} $R2 == 258
       System::Call 'kernel32::CloseHandle(p $UpdateChildHandle)'
       StrCpy $UpdateChildHandle ""
