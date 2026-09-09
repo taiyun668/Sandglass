@@ -39,6 +39,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseMetadataTests(unittest.TestCase):
+    def test_version_sources_agree(self):
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        package_source = (ROOT / "sandglass" / "__init__.py").read_text(encoding="utf-8")
+        installer = (ROOT / "packaging" / "sandglass.nsi").read_text(encoding="utf-8")
+        version = metadata["project"]["version"]
+
+        self.assertIn(f'__version__ = "{version}"', package_source)
+        self.assertIn(f'!define APPVERSION "{version}"', installer)
+
     def test_project_declares_its_build_backend(self):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
