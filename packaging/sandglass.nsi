@@ -1183,6 +1183,7 @@ Section "Uninstall"
     ClearErrors
     Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"
     ${If} ${Errors}
+      SetErrorLevel 9
       MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run the uninstaller again."
       Abort
     ${EndIf}

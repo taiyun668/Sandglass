@@ -264,6 +264,10 @@ class ReleaseMetadataTests(unittest.TestCase):
         # the uninstaller must still avoid recursively deleting a user-chosen
         # install directory.
         uninstall = installer.split('Section "Uninstall"', 1)[1]
+        rename_probe = uninstall.split(
+            'Rename "$INSTDIR\Sandglass.exe" "$INSTDIR\Sandglass.exe.removing"', 1
+        )[1].split('Abort', 1)[0]
+        self.assertIn("SetErrorLevel 9", rename_probe)
         self.assertNotIn('RMDir /r "$INSTDIR"', uninstall)
         self.assertIn(r'RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"', installer)
         self.assertIn('"/S"', installer_smoke)

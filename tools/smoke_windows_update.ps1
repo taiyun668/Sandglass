@@ -849,7 +849,14 @@ try {
     $uninstallAttempted = $true
     $null = Wait-ProcessExitBounded $uninstall 120 "Updated uninstaller"
     $uninstall.Refresh()
-    if ($uninstall.ExitCode -ne 0) { throw "Updated uninstaller returned exit code $($uninstall.ExitCode)." }
+    if ($uninstall.ExitCode -ne 0) {
+        $remaining = @(Get-ProcessesFromInstall | ForEach-Object {
+            "$($_.ProcessId):$($_.CommandLine)"
+        }) -join "; "
+        $observerHeld = Test-MutexHeld "Local\Sandglass.Observer.SingleInstance"
+        throw ("Updated uninstaller returned exit code $($uninstall.ExitCode); " +
+            "remaining=[$remaining]; observer_mutex_held=$observerHeld.")
+    }
     $null = Wait-Until {
         @($installedOwnedPaths | Where-Object {
             Test-Path -LiteralPath (Join-Path $installDir $_)
