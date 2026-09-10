@@ -171,6 +171,19 @@ def _run_runner(
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
+def _assert_communicate_times_out(process, timeout: float) -> None:
+    started = time.monotonic()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return
+    elapsed = time.monotonic() - started
+    raise AssertionError(
+        f"process returned before {timeout}s: returncode={process.returncode}; "
+        f"stdout={stdout!r} stderr={stderr!r} elapsed={elapsed:.3f}s"
+    )
+
+
 @unittest.skipUnless(
     os.name == "nt" and _powershells(), "Windows PowerShell is required"
 )
@@ -786,14 +799,48 @@ class InstallerWaitTests(unittest.TestCase):
                     mutant_child_pid, recorded = map(int, handshake.read_text().split("|"))
                     self.assertEqual(recorded, 0)
                     self.assertTrue(_alive(mutant_child_pid))
-                    with self.assertRaises(subprocess.TimeoutExpired):
-                        mutated_process.communicate(timeout=3)
+                    _assert_communicate_times_out(mutated_process, timeout=3)
                 finally:
                     if mutated_process.poll() is None:
                         mutated_process.kill()
                         mutated_process.wait(timeout=2)
                     if mutant_child_pid is not None:
                         _terminate(mutant_child_pid)
+
+    def test_timeout_diagnostic_reports_early_error(self):
+        """An early installer error exposes its exit code and stderr."""
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-early-error-") as tmp:
+                runner = Path(tmp) / "early-error.ps1"
+                runner.write_text(
+                    "[Console]::Out.WriteLine('known early stdout')\n"
+                    "[Console]::Error.WriteLine('known early error')\n"
+                    "exit 37\n",
+                    encoding="utf-8",
+                )
+                process = subprocess.Popen(
+                    [
+                        powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                        "Bypass", "-File", str(runner),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    with self.assertRaises(AssertionError) as raised:
+                        _assert_communicate_times_out(process, timeout=20)
+                    diagnostic = str(raised.exception)
+                    self.assertEqual(process.returncode, 37)
+                    self.assertIn("returncode=37", diagnostic)
+                    self.assertIn("known early stdout", diagnostic)
+                    self.assertIn("known early error", diagnostic)
+                    self.assertIn("elapsed=", diagnostic)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=2)
 
 
 def _makensis() -> Path | None:
