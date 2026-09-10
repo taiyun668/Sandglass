@@ -41,6 +41,22 @@ blocks it outright, use the portable ZIP; do not disable Windows security.
 </p>
 <p align="center"><sub>Privacy-safe synthetic demo data. No real account or usage information is shown.</sub></p>
 
+## Floating orb and magnetic panel
+
+The compact orb can float freely or dock to a screen edge. Activating it opens
+the slim dashboard beside the same edge; minimizing the dashboard returns to
+the orb without stopping background observation.
+
+<p align="center">
+  <img src="docs/assets/sandglass-floating-orb-showcase.png" alt="Sandglass floating orb near the screen edge" width="900">
+</p>
+
+<p align="center">
+  <img src="docs/assets/sandglass-magnetic-panel-showcase.png" alt="Sandglass magnetic dashboard attached to the floating orb" width="900">
+</p>
+
+<p align="center"><sub>Showcase compositions made from the real Sandglass UI and brand assets. Demo data only.</sub></p>
+
 > **A complete evidence chain starts only after Sandglass begins observing.**
 > History from before install is attributed to an account only when an official
 > local source can prove it directly. Anything that cannot be proved stays

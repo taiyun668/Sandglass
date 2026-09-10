@@ -33,6 +33,21 @@ Sandglass 目前是未签名的社区版本，因此 Windows 首次安装时可�
 </p>
 <p align="center"><sub>隐私安全的合成演示数据；不包含任何真实账号或用量信息。</sub></p>
 
+## 悬浮球与磁吸面板
+
+悬浮球可以自由拖动，也可以吸附在屏幕边缘。点击悬浮球后，窄面板会在同一侧贴合展开；
+最小化面板后回到悬浮球，后台观测不会停止。
+
+<p align="center">
+  <img src="docs/assets/sandglass-floating-orb-showcase.png" alt="靠近屏幕边缘的 Sandglass 悬浮球" width="900">
+</p>
+
+<p align="center">
+  <img src="docs/assets/sandglass-magnetic-panel-showcase.png" alt="与悬浮球磁吸贴合的 Sandglass 面板" width="900">
+</p>
+
+<p align="center"><sub>基于真实 Sandglass UI 与品牌资产制作的展示合成图；只使用演示数据。</sub></p>
+
 > **观测从 Sandglass 介入后开始形成完整证据链。** 安装前的历史只有在官方本机
 > 信源能够直接证明时才会归属到账号；证明不了的部分会如实保持未归属，不会按
 > 当前登录账号倒推过去。
