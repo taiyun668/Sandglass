@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "x64.nsh"
 
 !ifndef APPVERSION
-!define APPVERSION "0.1.6"
+!define APPVERSION "0.1.7"
 !endif
 !ifndef SOURCEDIR
   !define SOURCEDIR "..\dist\Sandglass"
@@ -95,9 +95,6 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 !insertmacro MUI_PAGE_DIRECTORY
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW UpdateInstFilesShow
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "$INSTDIR\Sandglass.exe"
-!define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
-!insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
@@ -227,16 +224,16 @@ Function UpdateSkipPage
 FunctionEnd
 
 Function UpdateInstFilesShow
+  ; A completed install has no second decision to ask for. Close the installer
+  ; as soon as the section finishes; every success path below starts Sandglass
+  ; explicitly, so a Finish page would only leave a stale window beside it.
+  SetAutoClose true
   ${If} $UpdateMode == 1
     ; The update is unattended after the user confirmed it in Sandglass. A
     ; Cancel button here would leave the product stopped and the old directory
     ; potentially renamed, so make the progress page non-cancellable.
     GetDlgItem $0 $HWNDPARENT 2
     EnableWindow $0 0
-    ; The InstFiles page is the whole update UI. Close it automatically when
-    ; the section finishes instead of leaving a completed progress window next
-    ; to the relaunched application.
-    SetAutoClose true
     System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r1'
     ${If} $1 != 0
       System::Call 'user32::EnableMenuItem(p r1, i 0xF060, i 0x1)'
@@ -1141,9 +1138,9 @@ Section "Sandglass" SecMain
     ${EndIf}
   ${EndIf}
 
-  ; MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws. Without this
-  ; the in-app update installs correctly and ends with no Sandglass running:
-  ; the user clicks update, the panel disappears, and nothing comes back.
+  ; Every completion mode starts Sandglass here. The progress page is already
+  ; configured to close automatically, so no later Finish-page checkbox owns
+  ; whether the product comes back.
   ${If} $UpdateMode == 1
     ; /UPDATE intentionally keeps the InstFiles progress window visible, so it
     ; is not ${Silent}; relaunch explicitly when that page has completed.
@@ -1182,6 +1179,12 @@ Section "Sandglass" SecMain
     ${EndIf}
     Delete "$UpdateFailureLog"
   ${ElseIf} ${Silent}
+    Exec '"$INSTDIR\Sandglass.exe"'
+  ${Else}
+    ; Ordinary attended installs use the same final state as silent installs:
+    ; installer gone, product visible. Hiding first prevents a completed
+    ; progress window from overlapping the newly launched dashboard.
+    ShowWindow $HWNDPARENT 0
     Exec '"$INSTDIR\Sandglass.exe"'
   ${EndIf}
 SectionEnd

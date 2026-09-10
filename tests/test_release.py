@@ -1114,12 +1114,8 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         return [n for n, line in enumerate(section.splitlines())
                 if line.strip().startswith("Exec ") and target in line]
 
-    def test_a_silent_install_starts_the_program_again(self):
-        """The in-app update ends with the app running, or it ends with nothing.
-
-        MUI_FINISHPAGE_RUN is a checkbox on a page /S never draws, so it cannot
-        be what brings the program back after an update installs itself.
-        """
+    def test_successful_install_starts_the_program_again(self):
+        """Silent and attended installs both finish with the product running."""
         section = self._section(SECMAIN)
         lines = section.splitlines()
         write = next(n for n, line in enumerate(lines) if "File /r" in line and "SOURCEDIR" in line)
@@ -1127,7 +1123,41 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertTrue(relaunch, "静默安装装完必须把程序拉起来")
         self.assertGreater(relaunch[-1], write, "必须装完才拉起，不是装之前")
         after = section[section.index("File /r"):]
-        self.assertIn("${Silent}", after, "拉起必须条件在静默模式上，交互安装走结束页")
+        self.assertIn("${Silent}", after, "静默安装必须显式启动产品")
+        self.assertIn("${Else}", after, "交互安装必须显式启动产品")
+
+    def test_attended_install_autocloses_without_a_finish_page(self):
+        installer = self._nsi()
+        self.assertNotIn("MUI_FINISHPAGE_RUN", installer)
+        self.assertNotIn("MUI_PAGE_FINISH", installer)
+        show = installer.split("Function UpdateInstFilesShow", 1)[1].split(
+            "FunctionEnd", 1
+        )[0]
+        self.assertLess(
+            show.index("SetAutoClose true"),
+            show.index("${If} $UpdateMode == 1"),
+            "普通安装和更新都必须自动关闭安装器",
+        )
+        section = self._section(SECMAIN)
+        ordinary = section.split("${ElseIf} ${Silent}", 1)[1]
+        self.assertIn("${Else}", ordinary)
+        self.assertIn("ShowWindow $HWNDPARENT 0", ordinary)
+        self.assertIn("Exec '\"$INSTDIR\\Sandglass.exe\"'", ordinary)
+
+        # Put the defect back: auto-close applies only to update mode. The new
+        # test must fail on the attended-install boundary, not on unrelated UI.
+        mutated = show.replace(
+            "  SetAutoClose true\n  ${If} $UpdateMode == 1",
+            "  ${If} $UpdateMode == 1\n    SetAutoClose true",
+            1,
+        )
+        self.assertNotEqual(mutated, show)
+        with self.assertRaisesRegex(AssertionError, "普通安装"):
+            self.assertLess(
+                mutated.index("SetAutoClose true"),
+                mutated.index("${If} $UpdateMode == 1"),
+                "普通安装和更新都必须自动关闭安装器",
+            )
 
     def test_a_silent_install_never_waits_on_a_message_box(self):
         """/S does not suppress MessageBox.
