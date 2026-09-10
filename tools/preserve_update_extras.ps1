@@ -65,9 +65,6 @@ function Get-ProductPaths([string]$Root) {
         if (-not $seen.Contains($productPathsManifest)) {
             throw "product paths manifest does not own itself"
         }
-        if (-not $seen.Contains("Uninstall.exe")) {
-            throw "product paths manifest does not own the installer uninstaller"
-        }
         return $paths
     } catch {
         throw "Invalid product paths manifest '$manifestPath': $($_.Exception.Message)"

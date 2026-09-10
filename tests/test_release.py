@@ -245,11 +245,11 @@ class ReleaseMetadataTests(unittest.TestCase):
             line for line in installer.splitlines()
             if "System::Call" in line and "OpenMutexW" in line
         ]
-        self.assertEqual(len(probes), 4, probes)
+        self.assertEqual(len(probes), 2, probes)
         desktop_probes = [line for line in probes if "Desktop.SingleInstance" in line]
         observer_probes = [line for line in probes if "Observer.SingleInstance" in line]
-        self.assertEqual(len(desktop_probes), 2, desktop_probes)
-        self.assertEqual(len(observer_probes), 2, observer_probes)
+        self.assertEqual(len(desktop_probes), 1, desktop_probes)
+        self.assertEqual(len(observer_probes), 1, observer_probes)
         for probe in probes:
             self.assertTrue(probe.rstrip().endswith("? e'"), probe.strip())
         self.assertNotIn("kernel32::GetLastError()", installer)
@@ -262,34 +262,19 @@ class ReleaseMetadataTests(unittest.TestCase):
             'WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run"',
             installer,
         )
-        self.assertIn(r'%LOCALAPPDATA%\sandglass is also deliberately preserved', installer)
         self.assertIn(
             'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"',
             installer,
         )
-        # The update rollback is allowed to remove the newly activated tree;
-        # the uninstaller must still avoid recursively deleting a user-chosen
-        # install directory.
-        uninstall = installer.split('Section "Uninstall"', 1)[1]
-        desktop_probe = uninstall.split(
-            "Call un.CheckSandglassDesktopMutex", 1
-        )[1].split('${If} ${FileExists} "$INSTDIR\\Sandglass.exe"', 1)[0]
-        self.assertIn("SetErrorLevel 9", desktop_probe)
-        self.assertIn("SetErrorLevel 10", desktop_probe)
-        self.assertLess(
-            uninstall.index("Call un.CheckSandglassDesktopMutex"),
-            uninstall.index("DeleteRegKey"),
-        )
-        self.assertLess(
-            uninstall.index("Abort"),
-            uninstall.index("DeleteRegKey"),
-        )
-        self.assertNotIn("Sandglass.exe.removing", uninstall)
-        self.assertNotIn('RMDir /r "$INSTDIR"', uninstall)
-        self.assertIn(r'RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"', installer)
-        self.assertIn('"/S"', installer_smoke)
+        # Uninstall is now the signed/allowed main executable; no NSIS
+        # uninstaller section or generated Uninstall.exe remains.
+        self.assertIn('"UninstallString" "$\\"$INSTDIR\\Sandglass.exe$\\" --uninstall"', installer)
+        self.assertIn('"QuietUninstallString" "$\\"$INSTDIR\\Sandglass.exe$\\" --uninstall --quiet"', installer)
+        self.assertNotIn('Section "Uninstall"', installer)
+        self.assertNotIn("WriteUninstaller", installer)
+        self.assertIn('"--uninstall --quiet"', installer_smoke)
         self.assertIn("Uninstalling while the desktop is running returned", installer_smoke)
-        self.assertIn("expected 9", installer_smoke)
+        self.assertIn("expected 0", installer_smoke)
         self.assertIn("--self-test", installer_smoke)
         self.assertIn("Get-TreeSnapshot $providerRoot", installer_smoke)
         self.assertIn("Installer did not create the default desktop shortcut", installer_smoke)
@@ -311,7 +296,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn('assets" / "orb.ico"', spec)
         self.assertNotIn('assets" / "app.ico"', spec)
         self.assertIn('Icon "..\\sandglass\\web\\assets\\orb.ico"', installer)
-        self.assertIn('UninstallIcon "..\\sandglass\\web\\assets\\orb.ico"', installer)
+        self.assertNotIn('UninstallIcon "..\\sandglass\\web\\assets\\orb.ico"', installer)
 
     def test_windows_update_smoke_is_bounded_and_exercises_the_real_protocol(self):
         script_path = ROOT / "tools" / "smoke_windows_update.ps1"
@@ -421,7 +406,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("Provider snapshot refuses a reparse point", script)
         self.assertIn('Type = "Directory"', script)
         self.assertIn("$uninstallAttempted", script)
-        self.assertIn('-ArgumentList "/S"', script)
+        self.assertIn('-ArgumentList "--uninstall --quiet"', script)
         self.assertNotIn('"_?=$installDir"', script)
         self.assertIn("$installedOwnedPaths", script)
         self.assertIn("$customUnderInstallDir", script)
@@ -730,10 +715,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                     {"schema": 1, "paths": actual_paths}, separators=(",", ":")
                 ) + "\n").encode("utf-8")
             )
-            self.assertTrue(any(
-                "missing installer-created paths: Uninstall.exe" in error
-                for error in inspect_bundle(root)
-            ))
+            self.assertEqual(inspect_bundle(root), [])
             write_owned_paths_manifest(root)
             first = Path(tmp) / "first.zip"
             second = Path(tmp) / "second.zip"
@@ -843,7 +825,12 @@ class ReleaseMetadataTests(unittest.TestCase):
             )
             script = ROOT / "tools" / "sign_release_manifest.ps1"
             quote = lambda path: "'" + str(path).replace("'", "''") + "'"
+            # Stop, so a signer that never ran is a non-zero exit carrying its
+            # reason. Without it the script failing to load was a non-terminating
+            # error, the Write-Output below still succeeded, and the only symptom
+            # was a .sig that did not exist.
             command = """
+$ErrorActionPreference = 'Stop'
 $key = [System.Security.Cryptography.ECDsa]::Create(
     [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
 $full = $key.ExportParameters($true)
@@ -857,8 +844,15 @@ $q = $key.ExportParameters($false).Q
 Write-Output ('PUBLIC=' + ([System.BitConverter]::ToString($q.X) + [System.BitConverter]::ToString($q.Y)).Replace('-', ''))
 """.replace("__KEY__", quote(key)).replace("__SCRIPT__", quote(script)).replace(
                 "__MANIFEST__", quote(manifest))
+            # Bypass, because that is how every real caller runs the signer:
+            # build.cmd launches the release build with it and the Owner's
+            # one-command setup documents it. Without it this test measured the
+            # machine's execution policy -- green on GitHub runners, where
+            # scripts are allowed, and red on a default Windows client, where
+            # they are not -- instead of the signer.
             result = subprocess.run(
-                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+                [powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-Command", command],
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1018,21 +1012,15 @@ class RunningInstallLifecycleTests(unittest.TestCase):
             HTTP_TIMEOUT_SECONDS * len(CACHE_TTL_SECONDS_BY_PROVIDER),
         )
 
-    def test_install_and_uninstall_read_what_stop_reported(self):
-        for name in ('Section "Sandglass" SecMain', 'Section "Uninstall"'):
-            with self.subTest(section=name):
-                section = self._section(name)
-                self.assertNotIn("Sleep 2000", section,
-                                 "固定等待看不见一个可能十几秒才结束的退出")
-                # The directive, not the phrase: the comment beside it says
-                # --stop too, and matching that would pass either way.
-                calls = [line for line in section.splitlines()
-                         if "ExecWait" in line and "--stop" in line]
-                self.assertEqual(len(calls), 1, section)
-                self.assertTrue(calls[0].rstrip().endswith("$0"),
-                                f"ExecWait 必须收下退出码: {calls[0].strip()}")
-                self.assertIn("Sandglass.Observer.SingleInstance", self._nsi(),
-                              "持有文件的是 observer,门必须查它")
+    def test_uninstall_dispatches_to_the_installed_executable(self):
+        from sandglass import desktop
+
+        with mock.patch("sandglass.uninstall.main", return_value=17) as remove, \
+             mock.patch.object(desktop, "require_canonical_state_home") as attest, \
+             mock.patch.object(desktop.sys, "argv", ["Sandglass.exe", "--uninstall", "--quiet"]):
+            self.assertEqual(desktop.main(), 17)
+        remove.assert_called_once_with(quiet=True)
+        attest.assert_not_called()
 
     def test_install_stops_the_previous_copy_before_writing(self):
         section = self._section('Section "Sandglass" SecMain')
@@ -1232,7 +1220,6 @@ class RunningInstallLifecycleTests(unittest.TestCase):
             'CreateDirectory "$SMPROGRAMS\\Sandglass"',
             'CreateShortcut "$SMPROGRAMS\\Sandglass\\Sandglass.lnk"',
             'CreateShortcut "$DESKTOP\\Sandglass.lnk"',
-            'WriteUninstaller "$INSTDIR\\Uninstall.exe"',
             'WriteRegStr HKCU "Software\\Sandglass" "InstallDir"',
             'WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass" "DisplayVersion"',
             'WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass" "NoRepair"',
@@ -1453,25 +1440,6 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         self.assertIn('$UpdateHasInstalled != 1', section)
         self.assertIn('$UpdateOldRunPresent == 1', section)
 
-    def test_desktop_shortcut_is_default_and_follows_install_lifecycle(self):
-        """The visible desktop entry is an installer-owned default, not a smoke fixture."""
-        installer = self._nsi()
-        section = self._section(SECMAIN)
-        uninstall = self._section('Section "Uninstall"')
-        create = 'CreateShortcut "$DESKTOP\\Sandglass.lnk" "$INSTDIR\\Sandglass.exe" "" "$INSTDIR\\Sandglass.exe"'
-        delete = 'Delete "$DESKTOP\\Sandglass.lnk"'
-        self.assertIn(create, section)
-        self.assertIn(delete, uninstall)
-        self.assertIn("Call SnapshotUpdateDesktopShortcut", section)
-        self.assertIn("Function SnapshotUpdateDesktopShortcut", installer)
-
-        # Reintroduce the defect: the desktop link is no longer created. The
-        # contract must fail specifically at the missing default-create step.
-        mutated = section.replace(create, "; desktop shortcut omitted", 1)
-        self.assertNotEqual(mutated, section)
-        with self.assertRaisesRegex(AssertionError, "desktop shortcut"):
-            self.assertIn(create, mutated, "desktop shortcut is not created by default")
-
     def test_portable_update_never_uses_an_empty_install_registry_path(self):
         section = self._section(SECMAIN)
         activation = section[section.index('File /r "${SOURCEDIR}') :]
@@ -1494,62 +1462,6 @@ class RunningInstallLifecycleTests(unittest.TestCase):
         stage = nsi.index('StrCpy $UpdateStage "$TEMP\\Sandglass-update-$UpdateParentPid"')
         self.assertLess(canonicalize, stage)
         self.assertIn('${If} $R7 <= 0', nsi[canonicalize:stage])
-
-    def test_uninstall_stops_observing_before_deleting(self):
-        section = self._section('Section "Uninstall"')
-        stop = self._directive_line(
-            section, lambda line: line.strip().startswith("ExecWait ")
-            and "--stop" in line
-        )
-        remove = self._directive_line(
-            section, lambda line: line.strip().startswith("RMDir /r ")
-            and "\\_internal" in line
-        )
-        self.assertLess(stop, remove,
-                        "必须先停止观测再删除程序目录")
-
-    def test_uninstall_also_refuses_while_the_panel_is_running(self):
-        """--stop alone is not enough: the panel supervises the observer.
-
-        A running panel puts a stopped observer back within the minute, which
-        would land in the middle of the uninstall. Rename of Sandglass.exe is
-        not that proof: Windows allows renaming a loaded PyInstaller image.
-        The desktop mutex is the same authority the installer already uses.
-        """
-        section = self._section('Section "Uninstall"')
-        mutex = self._directive_line(
-            section, lambda line: "un.CheckSandglassDesktopMutex" in line
-        )
-        remove = self._directive_line(
-            section, lambda line: line.strip().startswith("RMDir /r ")
-            and "\\_internal" in line
-        )
-        delete_reg = self._directive_line(
-            section,
-            lambda line: 'DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sandglass"' in line,
-        )
-        delete_run = self._directive_line(
-            section,
-            lambda line: 'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "sandglass"' in line,
-        )
-        self.assertNotIn("Sandglass.exe.removing", section)
-        self.assertFalse(
-            any("Rename" in line for _, line in self._real_directives(section)),
-            "uninstall must not use Rename as the desktop-running test",
-        )
-        self.assertIn("SetErrorLevel 9", section)
-        self.assertIn("SetErrorLevel 10", section)
-        self.assertIn("${IfNot} ${Silent}", section)
-        self.assertLess(mutex, remove, "面板还在跑时必须中止，而不是删一半")
-        self.assertLess(mutex, delete_reg)
-        self.assertLess(mutex, delete_run)
-        self.assertLess(section.index("Abort"), section.index("DeleteRegKey"))
-
-    def test_the_state_directory_is_still_preserved(self):
-        """The counterpart: stopping is not licence to delete the books."""
-        section = self._section('Section "Uninstall"')
-        self.assertNotIn(r"$LOCALAPPDATA\sandglass", section.replace("; ", ""))
-
 
 if __name__ == "__main__":
     unittest.main()

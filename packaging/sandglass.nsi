@@ -9,7 +9,7 @@ SetCompressor /SOLID lzma
 !include "x64.nsh"
 
 !ifndef APPVERSION
-!define APPVERSION "0.1.7"
+!define APPVERSION "0.1.8"
 !endif
 !ifndef SOURCEDIR
   !define SOURCEDIR "..\dist\Sandglass"
@@ -48,6 +48,8 @@ Var UpdateOldDisplayIcon
 Var UpdateOldDisplayIconPresent
 Var UpdateOldUninstallString
 Var UpdateOldUninstallStringPresent
+Var UpdateOldQuietUninstallString
+Var UpdateOldQuietUninstallStringPresent
 Var UpdateOldNoModify
 Var UpdateOldNoModifyPresent
 Var UpdateOldNoRepair
@@ -68,13 +70,13 @@ Var UpdateDesktopShortcutChanged
 Var UpdatePreserveSource
 Var UpdatePreserveTarget
 Var UpdatePreserveOk
+Var InstallationMutationHandle
 
 Name "Sandglass"
 OutFile "${ARTIFACTDIR}\${ARTIFACTNAME}.exe"
 InstallDir "$LOCALAPPDATA\Programs\Sandglass"
 InstallDirRegKey HKCU "Software\Sandglass" "InstallDir"
 Icon "..\sandglass\web\assets\orb.ico"
-UninstallIcon "..\sandglass\web\assets\orb.ico"
 BrandingText "Sandglass"
 
 VIProductVersion "${APPVERSION}.0"
@@ -86,7 +88,6 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\sandglass\web\assets\orb.ico"
-!define MUI_UNICON "..\sandglass\web\assets\orb.ico"
 !define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_PAGE_CUSTOMFUNCTION_PRE UpdateSkipPage
@@ -95,14 +96,13 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Ayun"
 !insertmacro MUI_PAGE_DIRECTORY
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW UpdateInstFilesShow
 !insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "TradChinese"
 
 Function .onInit
+  Call AcquireInstallationMutation
   StrCpy $UpdateMode 0
   ${GetParameters} $R9
   ClearErrors
@@ -170,6 +170,26 @@ Function .onInit
     ${EndIf}
     Abort
   ${EndIf}
+FunctionEnd
+
+; Hold this object for the whole installer process. The main-executable
+; uninstaller transfers the same object to its cleanup child, so installation
+; and removal cannot both pass a one-time runtime probe and mutate the tree.
+Function AcquireInstallationMutation
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Local\Sandglass.Installation.Mutation") p .r0 ? e'
+  Pop $R8
+  ${If} $0 == 0
+    SetErrorLevel 3
+    Abort
+  ${EndIf}
+  ${If} $R8 == 183
+    System::Call 'kernel32::CloseHandle(p r0)'
+    IfSilent +2
+      MessageBox MB_OK|MB_ICONEXCLAMATION "Another Sandglass installation or removal is in progress."
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
+  StrCpy $InstallationMutationHandle $0
 FunctionEnd
 
 ; Validate the update capability before it is used to name a kernel object.
@@ -541,6 +561,11 @@ Function SnapshotUpdateRegistry
     StrCpy $UpdateOldUninstallStringPresent 1
   ${EndIf}
   ClearErrors
+  ReadRegStr $UpdateOldQuietUninstallString HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "QuietUninstallString"
+  ${IfNot} ${Errors}
+    StrCpy $UpdateOldQuietUninstallStringPresent 1
+  ${EndIf}
+  ClearErrors
   ReadRegDWORD $UpdateOldNoModify HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify"
   ${IfNot} ${Errors}
     StrCpy $UpdateOldNoModifyPresent 1
@@ -581,6 +606,11 @@ Function RestoreUpdateRegistry
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString" "$UpdateOldUninstallString"
   ${Else}
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString"
+  ${EndIf}
+  ${If} $UpdateOldQuietUninstallStringPresent == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "QuietUninstallString" "$UpdateOldQuietUninstallString"
+  ${Else}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "QuietUninstallString"
   ${EndIf}
   ${If} $UpdateOldNoModifyPresent == 1
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "NoModify" $UpdateOldNoModify
@@ -1011,15 +1041,6 @@ Section "Sandglass" SecMain
     Abort
   ${EndIf}
   ClearErrors
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  ${If} ${Errors}
-    StrCpy $UpdatePhase "write-uninstaller"
-    ${If} $UpdateMode == 1
-      Call UpdateFailure
-    ${EndIf}
-    Abort
-  ${EndIf}
-  ClearErrors
   WriteRegStr HKCU "Software\Sandglass" "InstallDir" "$INSTDIR"
   ${If} ${Errors}
     StrCpy $UpdatePhase "write-install-registry"
@@ -1095,9 +1116,18 @@ Section "Sandglass" SecMain
     Abort
   ${EndIf}
   ClearErrors
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "UninstallString" "$\"$INSTDIR\Sandglass.exe$\" --uninstall"
   ${If} ${Errors}
     StrCpy $UpdatePhase "write-uninstall-string"
+    ${If} $UpdateMode == 1
+      Call UpdateFailure
+    ${EndIf}
+    Abort
+  ${EndIf}
+  ClearErrors
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass" "QuietUninstallString" "$\"$INSTDIR\Sandglass.exe$\" --uninstall --quiet"
+  ${If} ${Errors}
+    StrCpy $UpdatePhase "write-quiet-uninstall-string"
     ${If} $UpdateMode == 1
       Call UpdateFailure
     ${EndIf}
@@ -1187,124 +1217,4 @@ Section "Sandglass" SecMain
     ShowWindow $HWNDPARENT 0
     Exec '"$INSTDIR\Sandglass.exe"'
   ${EndIf}
-SectionEnd
-
-Function un.CheckSandglassMutex
-  ; ? e makes the System plugin capture GetLastError the instant the call
-  ; returns. A separate System::Call to GetLastError does not work: the plugin
-  ; makes its own Win32 calls in between and the thread's last error is gone by
-  ; then. That branch had never run -- the desktop mutex was always held when
-  ; this was reached, so the not-found path was first exercised tonight, and it
-  ; answered "unknown" for a mutex that was plainly free.
-  System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "Local\Sandglass.Observer.SingleInstance") p .r3 ? e'
-  Pop $4
-  ${If} $3 != 0
-    System::Call 'kernel32::CloseHandle(p r3)'
-    Push "held"
-  ${Else}
-    ${If} $4 == 2
-      Push "free"
-    ${Else}
-      Push "unknown"
-    ${EndIf}
-  ${EndIf}
-FunctionEnd
-
-Function un.CheckSandglassDesktopMutex
-  ; Same fail-closed OpenMutexW capture as the installer. A PyInstaller
-  ; executable may be renamed while its process is still alive, so Rename of
-  ; Sandglass.exe is not evidence that this mutex is free.
-  System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "Local\Sandglass.Desktop.SingleInstance") p .r3 ? e'
-  Pop $4
-  ${If} $3 != 0
-    System::Call 'kernel32::CloseHandle(p r3)'
-    Push "held"
-  ${Else}
-    ${If} $4 == 2
-      Push "free"
-    ${Else}
-      Push "unknown"
-    ${EndIf}
-  ${EndIf}
-FunctionEnd
-
-Section "Uninstall"
-  SetShellVarContext current
-
-  ; Ask the desktop mutex before any deletion. --stop reaches only the
-  ; observer; a running panel puts it back, and the previous Rename of
-  ; Sandglass.exe was allowed by Windows while that panel still held this
-  ; mutex. Distinct codes: an abort otherwise reports NSIS's generic 2.
-  ; /S does not suppress MessageBox, so silent refusal must not wait on one.
-  Call un.CheckSandglassDesktopMutex
-  Pop $R1
-  ${If} $R1 == "held"
-    SetErrorLevel 9
-    ${IfNot} ${Silent}
-      MessageBox MB_ICONSTOP "Sandglass is still running. Close it from the tray icon and run the uninstaller again."
-    ${EndIf}
-    Abort
-  ${ElseIf} $R1 != "free"
-    SetErrorLevel 10
-    ${IfNot} ${Silent}
-      MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass is still running. The uninstaller will not remove it."
-    ${EndIf}
-    Abort
-  ${EndIf}
-
-  ; Stop observing before removing the program. The observer outlives the panel
-  ; by design, so an uninstall that only deletes files leaves it running -- out
-  ; of a half-deleted directory, still writing to the state directory this
-  ; uninstaller deliberately preserves.
-  ${If} ${FileExists} "$INSTDIR\Sandglass.exe"
-    ; Same as the install path: --stop reports whether the observer let go,
-    ; and the mutex is asked anyway. A fixed sleep cannot see an exit bounded
-    ; by a fifteen-second vendor request per provider.
-    ExecWait '"$INSTDIR\Sandglass.exe" --stop' $0
-    ${If} $0 != 0
-      SetErrorLevel 6
-      ${IfNot} ${Silent}
-        MessageBox MB_ICONSTOP "Sandglass could not confirm that its background observer stopped. Quit Sandglass from the tray icon and run the uninstaller again."
-      ${EndIf}
-      Abort
-    ${EndIf}
-    Call un.CheckSandglassMutex
-    Pop $R1
-    ${If} $R1 == "held"
-      SetErrorLevel 7
-      ${IfNot} ${Silent}
-        MessageBox MB_ICONSTOP "Sandglass's background observer is still running. Quit Sandglass from the tray icon and run the uninstaller again."
-      ${EndIf}
-      Abort
-    ${ElseIf} $R1 != "free"
-      SetErrorLevel 8
-      ${IfNot} ${Silent}
-        MessageBox MB_ICONSTOP "Windows could not verify whether Sandglass's background observer is running. The uninstaller will not remove it."
-      ${EndIf}
-      Abort
-    ${EndIf}
-  ${EndIf}
-
-  Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"
-  RMDir "$SMPROGRAMS\Sandglass"
-  Delete "$DESKTOP\Sandglass.lnk"
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"
-  DeleteRegKey HKCU "Software\Sandglass"
-  ; Remove only Sandglass's own opt-in login entry.  Leaving it behind would
-  ; make Windows launch a deleted executable on every future sign-in.
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass"
-  ; Remove only known installed paths.  Do not recursively delete $INSTDIR:
-  ; the user may have selected a pre-existing directory.  Sandglass state under
-  ; %LOCALAPPDATA%\sandglass is also deliberately preserved.
-  RMDir /r "$INSTDIR\_internal"
-  Delete "$INSTDIR\Sandglass.exe"
-  Delete "$INSTDIR\LICENSE"
-  Delete "$INSTDIR\PRIVACY.md"
-  Delete "$INSTDIR\SUPPORT.md"
-  Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
-  Delete "$INSTDIR\Sandglass-owned-paths.json"
-  RMDir /r "$INSTDIR\THIRD_PARTY_LICENSES"
-  Delete "$INSTDIR\Uninstall.exe"
-  Delete "$INSTDIR\.sandglass-owner"
-  RMDir "$INSTDIR"
 SectionEnd

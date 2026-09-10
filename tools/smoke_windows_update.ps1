@@ -216,6 +216,21 @@ function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$Fail
     throw $Failure
 }
 
+function Wait-UninstallReceipt([string]$Receipt, [int]$TimeoutSeconds) {
+    return Wait-Until {
+        if (-not (Test-Path -LiteralPath $Receipt -PathType Leaf)) { return $false }
+        $result = Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+        if ($result.status -eq "failed") {
+            throw "Uninstall helper failed in $($result.phase): $($result.detail)"
+        }
+        if ($result.status -eq "success" -and
+            -not (Test-MutexHeld 'Local\Sandglass.Installation.Mutation') -and
+            -not (Test-MutexHeld 'Local\Sandglass.Desktop.SingleInstance') -and
+            -not (Test-MutexHeld 'Local\Sandglass.Observer.SingleInstance')) { return $result }
+        return $false
+    } $TimeoutSeconds "Uninstall helper did not report completion within $TimeoutSeconds seconds."
+}
+
 function Wait-ProcessExitBounded([System.Diagnostics.Process]$Process,
     [int]$TimeoutSeconds, [string]$Description) {
     if ($null -eq $Process) { return }
@@ -637,10 +652,6 @@ try {
         # arguments, and REG_EXPAND_SZ kind.
         Restore-RegistryKey $oldInstallKey $oldInstallState
         Restore-RegistryKey $oldUninstallKey $oldUninstallState
-        foreach ($uninstallerName in @("Uninstall.exe", "unins000.exe")) {
-            Remove-Item -LiteralPath (Join-Path $activeDir $uninstallerName) `
-                -Force -ErrorAction SilentlyContinue
-        }
         $shortcutDirectory = Split-Path -Parent $shortcutPath
         if ($originalShortcutState.Existed) {
             Copy-Item -LiteralPath $shortcutOriginalPath -Destination $shortcutPath -Force
@@ -845,11 +856,13 @@ try {
 
     Invoke-InstalledStop
     Stop-InstalledProcesses
-    $uninstallerPath = Join-Path $installDir "Uninstall.exe"
-    if (-not (Test-Path -LiteralPath $uninstallerPath)) {
-        $uninstallerPath = Join-Path $installDir "unins000.exe"
+    $uninstallerPath = Join-Path $installDir "Sandglass.exe"
+    if (-not (Test-Path -LiteralPath $uninstallerPath)) { throw "Updated uninstall launcher is missing." }
+    $registeredUninstall = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass").UninstallString
+    if ($registeredUninstall -notmatch [regex]::Escape($uninstallerPath) -or
+        $registeredUninstall -notmatch "--uninstall") {
+        throw "Updated uninstall registry entry does not target Sandglass.exe --uninstall."
     }
-    if (-not (Test-Path -LiteralPath $uninstallerPath)) { throw "Updated uninstaller is missing." }
     $ownedManifestPath = Join-Path $installDir "Sandglass-owned-paths.json"
     try {
         $ownedManifest = Get-Content -LiteralPath $ownedManifestPath -Raw | ConvertFrom-Json
@@ -873,11 +886,9 @@ try {
     $customRoot = Get-FullPath (Split-Path -Parent $customFile)
     $customUnderInstallDir = $customRoot.StartsWith(
         $installPrefix, [StringComparison]::OrdinalIgnoreCase)
-    # Use the same self-copy path as the registered uninstaller. Passing
-    # _?=$installDir forces it to execute in place, which makes its own file and
-    # directory undeletable and creates a smoke-only residue the real user path
-    # does not create.
-    $uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList "/S" `
+    $uninstallReceipt = Join-Path $sandglassHome "uninstall-result.json"
+    Remove-Item -LiteralPath $uninstallReceipt -Force -ErrorAction SilentlyContinue
+    $uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList "--uninstall --quiet" `
         -PassThru -WindowStyle Hidden
     $uninstallAttempted = $true
     $null = Wait-ProcessExitBounded $uninstall 120 "Updated uninstaller"
@@ -890,11 +901,12 @@ try {
         throw ("Updated uninstaller returned exit code $($uninstall.ExitCode); " +
             "remaining=[$remaining]; observer_mutex_held=$observerHeld.")
     }
+    $null = Wait-UninstallReceipt $uninstallReceipt 120
     $null = Wait-Until {
         @($installedOwnedPaths | Where-Object {
             Test-Path -LiteralPath (Join-Path $installDir $_)
         }).Count -eq 0
-    } 30 "Registered uninstall left a Sandglass-owned path behind."
+    } 15 "Registered uninstall left a Sandglass-owned path behind."
     if ((Get-TreeSnapshot $customRoot) -cne $customTreeSnapshot) {
         throw "Uninstall removed or changed owner files."
     }

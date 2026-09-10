@@ -1554,6 +1554,12 @@ def _record_fallback_runtime_identity() -> None:
 
 
 def main() -> int:
+    # Uninstall must run before state-home attestation: removal is precisely
+    # the recovery path for a damaged or unavailable state directory.
+    if "--uninstall" in sys.argv:
+        from sandglass.uninstall import main as uninstall_main
+
+        return uninstall_main(quiet="--quiet" in sys.argv)
     # This launcher has no argument parser: every invocation, including
     # --help/--version probes, must prove state ownership before dispatch.
     try:
@@ -1642,6 +1648,7 @@ def main() -> int:
     shell.mark = render(256, mark)          # icons scale down from one master
     shell.orb = Orb(render(side, mark), x, y,
                     on_click=shell.toggle_panel, on_activate=shell.activate,
+                    on_uninstall=shell.quit,
                     on_menu=shell.toggle_orb,
                     on_drag_start=shell.orb_drag_started,
                     on_move=shell.orb_moved,

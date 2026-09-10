@@ -23,10 +23,7 @@ TEXT_SUFFIXES = {".cfg", ".html", ".ini", ".js", ".json", ".md", ".txt"}
 # installer distinguish a user's extra file from a product file without
 # copying an old product tree back into a newer one.
 PRODUCT_PATHS_MANIFEST = "Sandglass-owned-paths.json"
-# NSIS creates this path after extracting the bundle.  It is still product
-# owned and must be declared so an old installed copy never gets preserved as
-# an owner file.
-INSTALLER_CREATED_PRODUCT_PATHS = {"Uninstall.exe"}
+INSTALLER_CREATED_PRODUCT_PATHS: set[str] = set()
 REQUIRED_BUNDLE_PATHS = {
     "Sandglass.exe",
     PRODUCT_PATHS_MANIFEST,
@@ -109,12 +106,6 @@ def _inspect_owned_paths_manifest(root: Path, files: dict[str, Path], errors: li
             raise ValueError("product paths must be a non-empty string list")
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ValueError("product paths must be sorted and unique")
-        missing_installer_paths = INSTALLER_CREATED_PRODUCT_PATHS - set(paths)
-        if missing_installer_paths:
-            raise ValueError(
-                "product paths manifest is missing installer-created paths: "
-                + ", ".join(sorted(missing_installer_paths))
-            )
         for path in paths:
             if not path or path in {".", ".."} or "/" in path or "\\" in path:
                 raise ValueError(f"unsafe product path: {path}")

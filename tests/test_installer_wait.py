@@ -12,10 +12,6 @@ import unittest
 import uuid
 from pathlib import Path
 
-if os.name == "nt":
-    import winreg
-
-
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "tools" / "smoke_windows_installer.ps1"
 BUILD = ROOT / "tools" / "build_windows_release.ps1"
@@ -89,6 +85,105 @@ class InstallerWaitTests(unittest.TestCase):
             function_source.index("$running.Count -gt 0"),
             function_source.index("return $running"),
         )
+
+    def test_direct_process_wait_reads_own_code_and_rejects_null(self):
+        """The smoke's process helper is a real direct-process gate."""
+        source = SMOKE.read_text(encoding="utf-8")
+        start = source.index("function Wait-DirectProcessExit")
+        end = source.index("# The silent path now starts Sandglass", start)
+        function_source = source[start:end]
+        self.assertLess(function_source.index("$processHandle"), function_source.index("$ownExitCode"))
+        self.assertLess(function_source.index("$ownExitCode"), function_source.index("$Process.Refresh()"))
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-direct-wait-") as tmp:
+                runner = Path(tmp) / "wait.ps1"
+                quoted = str(powershell).replace("'", "''")
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    + function_source
+                    + f"$child = Start-Process -FilePath '{quoted}' "
+                    "-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass',"
+                    "'-Command','exit 7') -PassThru -WindowStyle Hidden\n"
+                    "$code = Wait-DirectProcessExit $child 15 'fake child'\n"
+                    "if ($code -ne 7) { exit 21 }\n"
+                    "try { $null = Wait-DirectProcessExit $null 1 'null child'; exit 22 } "
+                    "catch { exit 0 }\n",
+                    encoding="utf-8",
+                )
+                done = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(runner)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
+
+    def test_direct_process_wait_timeout_reaps_exact_child(self):
+        """A known timeout kills/reaps only the process this smoke started."""
+        source = SMOKE.read_text(encoding="utf-8")
+        start = source.index("function Wait-DirectProcessExit")
+        end = source.index("# The silent path now starts Sandglass", start)
+        function_source = source[start:end]
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-direct-timeout-") as tmp:
+                runner = Path(tmp) / "timeout.ps1"
+                quoted = str(powershell).replace("'", "''")
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    "$script:SmokeCleanupBlocked = $false\n"
+                    + function_source
+                    + f"$child = Start-Process -FilePath '{quoted}' "
+                    "-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass',"
+                    "'-Command','Start-Sleep -Seconds 60') -PassThru -WindowStyle Hidden\n"
+                    "try { $null = Wait-DirectProcessExit $child 1 'timeout child'; exit 21 } "
+                    "catch { }\n"
+                    "if (-not $child.HasExited) { exit 22 }\n"
+                    "if ($script:SmokeCleanupBlocked) { exit 23 }\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                done = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(runner)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
+
+    def test_cleanup_is_suppressed_when_exact_process_reap_is_unknown(self):
+        """The smoke leaves its fixture for review when cleanup safety is unknown."""
+        source = SMOKE.read_text(encoding="utf-8")
+        start = source.index("function Remove-SmokeRoot")
+        end = source.index("Assert-UnderSmokeRoot $installDir", start)
+        function_source = source[start:end]
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-cleanup-blocked-") as tmp:
+                runner = Path(tmp) / "cleanup-blocked.ps1"
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    "$script:SmokeCleanupBlocked = $true\n"
+                    + function_source
+                    + f"$smokeRoot = '{str(Path(tmp) / 'fixture').replace(chr(39), chr(39) * 2)}'\n"
+                    + "New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null\n"
+                    + "try { Remove-SmokeRoot; exit 21 } catch { }\n"
+                    + "if (-not (Test-Path -LiteralPath $smokeRoot)) { exit 22 }\n"
+                    + "Remove-Item -LiteralPath $smokeRoot -Recurse -Force\n"
+                    + "exit 0\n",
+                    encoding="utf-8",
+                )
+                done = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(runner)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
     def test_the_packaged_self_test_gate_reads_the_process_exit_code(self):
         """A GUI-subsystem child is not waited for by a direct call.
@@ -349,12 +444,25 @@ class InstallerWaitTests(unittest.TestCase):
         """
         source = SMOKE.read_text(encoding="utf-8")
         first_start = source.index("$process = Start-Process")
-        first_end = source.index("if ($process.ExitCode", first_start)
+        first_end = source.index("if ($processExitCode", first_start)
         first_block = source[first_start:first_end]
         second_start = source.index("$again = Start-Process")
-        second_end = source.index("if ($again.ExitCode", second_start)
+        second_end = source.index("if ($againExitCode", second_start)
         second_block = source[second_start:second_end]
-        blocks = ((first_block, "$process"), (second_block, "$again"))
+        third_start = source.index("$reinstall = Start-Process")
+        third_end = source.index("if ($reinstallExitCode", third_start)
+        third_block = source[third_start:third_end]
+        blocks = (
+            (first_block, "$process", "$processExitCode"),
+            (second_block, "$again", "$againExitCode"),
+            (third_block, "$reinstall", "$reinstallExitCode"),
+        )
+        mutex_start = source.index("function Test-MutexHeld")
+        mutex_end = source.index("function Wait-ForInstalledSandglass", mutex_start)
+        mutex_function = source[mutex_start:mutex_end]
+        wait_start = source.index("function Wait-DirectProcessExit")
+        wait_end = source.index("# The silent path now starts Sandglass", wait_start)
+        wait_function = source[wait_start:wait_end]
 
         with tempfile.TemporaryDirectory(prefix="sandglass-installer-wait-") as tmp:
             root = Path(tmp)
@@ -379,7 +487,7 @@ class InstallerWaitTests(unittest.TestCase):
             )
 
             for powershell in _powershells():
-                for block, process_variable in blocks:
+                for block, process_variable, exit_variable in blocks:
                     for expected in (0, 2):
                         handshake = root / (
                             f"handshake-{Path(powershell).stem}-"
@@ -397,9 +505,15 @@ class InstallerWaitTests(unittest.TestCase):
                             "$env:FAKE_PARENT = $args[3]\n"
                             "$env:FAKE_HANDSHAKE = $args[4]\n"
                             "$env:FAKE_EXIT = $args[5]\n"
-                            f"{block}"
-                            f"if ({process_variable}.ExitCode -ne [int]$args[5]) {{ exit 41 }}\n"
-                            f"exit {process_variable}.ExitCode\n",
+                            # The launch block also observes the operation
+                            # mutex. Use its real read function and a unique
+                            # name, never the live product's mutex.
+                            + mutex_function
+                            + wait_function
+                            + f"$mutationMutexName = 'Local\\SandglassTests.Wait.{uuid.uuid4().hex}'\n"
+                            + f"{block}"
+                            f"if ({exit_variable} -ne [int]$args[5]) {{ exit 41 }}\n"
+                            f"exit {exit_variable}\n",
                             encoding="utf-8",
                         )
                         process = subprocess.Popen(
@@ -461,6 +575,64 @@ class InstallerWaitTests(unittest.TestCase):
                             if child_pid is not None:
                                 _terminate(child_pid)
 
+                # Mutation: restoring Start-Process -Wait to the reinstall
+                # launch makes PowerShell wait for the fake installer's
+                # long-lived grandchild.  This must time out; a source-text
+                # assertion alone would not distinguish the two mechanisms.
+                reinstall_mutant = third_block.replace(
+                    "-PassThru", "-Wait -PassThru", 1
+                )
+                self.assertNotEqual(reinstall_mutant, third_block)
+                handshake = root / f"handshake-{Path(powershell).stem}-reinstall-mutant.txt"
+                runner = root / f"run-{Path(powershell).stem}-reinstall-mutant.ps1"
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    "$installerPath = $args[0]\n"
+                    "$installDir = $args[1]\n"
+                    "$env:FAKE_PS = $args[2]\n"
+                    "$env:FAKE_PARENT = $args[3]\n"
+                    "$env:FAKE_HANDSHAKE = $args[4]\n"
+                    "$env:FAKE_EXIT = $args[5]\n"
+                    + mutex_function
+                    + wait_function
+                    + f"$mutationMutexName = 'Local\\SandglassTests.Wait.ReinstallMutant.{uuid.uuid4().hex}'\n"
+                    + reinstall_mutant
+                    + "if ($reinstallExitCode -ne [int]$args[5]) { exit 41 }\n"
+                    + "exit $reinstallExitCode\n",
+                    encoding="utf-8",
+                )
+                mutated_process = subprocess.Popen(
+                    [
+                        powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                        "Bypass", "-File", str(runner), str(launcher),
+                        str(root / "install-dir"), powershell, str(parent),
+                        str(handshake), "0",
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                mutant_child_pid = None
+                try:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and not handshake.exists():
+                        if mutated_process.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                    self.assertTrue(handshake.exists(), "-Wait mutant did not publish handshake")
+                    mutant_child_pid, recorded = map(int, handshake.read_text().split("|"))
+                    self.assertEqual(recorded, 0)
+                    self.assertTrue(_alive(mutant_child_pid))
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        mutated_process.communicate(timeout=3)
+                finally:
+                    if mutated_process.poll() is None:
+                        mutated_process.kill()
+                        mutated_process.wait(timeout=2)
+                    if mutant_child_pid is not None:
+                        _terminate(mutant_child_pid)
+
 
 def _makensis() -> Path | None:
     extra = []
@@ -495,28 +667,6 @@ def _nsi_function(source: str, name: str) -> str:
     return source[start:end]
 
 
-def _nsi_uninstall_section(source: str) -> str:
-    start = source.index('Section "Uninstall"')
-    end = source.index("SectionEnd", start) + len("SectionEnd")
-    return source[start:end]
-
-
-def _restore_rename_desktop_gate(section: str) -> str:
-    start = section.index("Call un.CheckSandglassDesktopMutex")
-    end = section.index('${If} ${FileExists} "$INSTDIR\\Sandglass.exe"')
-    return (
-        section[:start]
-        + '    ClearErrors\n'
-        + '    Rename "$INSTDIR\\Sandglass.exe" "$INSTDIR\\Sandglass.exe.removing"\n'
-        + '    ${If} ${Errors}\n'
-        + '      SetErrorLevel 9\n'
-        + '      Abort\n'
-        + '    ${EndIf}\n'
-        + '    Rename "$INSTDIR\\Sandglass.exe.removing" "$INSTDIR\\Sandglass.exe"\n\n  '
-        + section[end:]
-    )
-
-
 def _tree_snapshot(root: Path) -> dict[str, tuple[int, str]]:
     snapshot = {}
     for path in sorted(root.rglob("*")):
@@ -527,406 +677,6 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[int, str]]:
                 hashlib.sha256(data).hexdigest(),
             )
     return snapshot
-
-
-def _reg_value(path: str, name: str):
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
-            value, _ = winreg.QueryValueEx(key, name)
-            return value
-    except OSError:
-        return None
-
-
-def _delete_reg_key(path: str) -> None:
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
-    except OSError:
-        pass
-
-
-def _delete_run_value(name: str) -> None:
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.DeleteValue(key, name)
-    except OSError:
-        pass
-
-
-class _HeldMutex:
-    def __init__(self, name: str):
-        self.name = name
-        self.handle = None
-        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._kernel32.CreateMutexW.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p
-        ]
-        self._kernel32.CreateMutexW.restype = ctypes.c_void_p
-        self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        self._kernel32.CloseHandle.restype = ctypes.c_int
-
-    def __enter__(self):
-        ctypes.set_last_error(0)
-        handle = self._kernel32.CreateMutexW(None, True, self.name)
-        error = ctypes.get_last_error()
-        if not handle:
-            raise OSError(error, f"CreateMutexW failed for {self.name}")
-        if error == 183:
-            self._kernel32.CloseHandle(handle)
-            raise RuntimeError(f"mutex already held: {self.name}")
-        self.handle = handle
-        return self
-
-    def __exit__(self, *exc):
-        if self.handle:
-            self._kernel32.CloseHandle(self.handle)
-            self.handle = None
-
-
-class _UninstallProbe:
-    def __init__(
-        self,
-        install_dir: Path,
-        uninstaller: Path,
-        shortcut: Path,
-        desktop_mutex: str,
-        product_key: str,
-        uninstall_key: str,
-        run_value: str,
-        files_before: dict[str, tuple[int, str]],
-        shortcut_before: bytes,
-        reg_before: dict[str, object],
-    ):
-        self.install_dir = install_dir
-        self.uninstaller = uninstaller
-        self.shortcut = shortcut
-        self.desktop_mutex = desktop_mutex
-        self.product_key = product_key
-        self.uninstall_key = uninstall_key
-        self.run_value = run_value
-        self.files_before = files_before
-        self.shortcut_before = shortcut_before
-        self.reg_before = reg_before
-
-    def registration(self) -> dict[str, object]:
-        return {
-            "install_dir": _reg_value(self.product_key, "InstallDir"),
-            "display_name": _reg_value(self.uninstall_key, "DisplayName"),
-            "uninstall_string": _reg_value(self.uninstall_key, "UninstallString"),
-            "run": _reg_value(
-                r"Software\Microsoft\Windows\CurrentVersion\Run", self.run_value
-            ),
-        }
-
-    def cleanup_registry(self) -> None:
-        _delete_run_value(self.run_value)
-        _delete_reg_key(self.uninstall_key)
-        _delete_reg_key(self.product_key)
-
-
-@unittest.skipUnless(os.name == "nt", "Windows NSIS uninstaller probes are required")
-class UninstallDesktopMutexTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.makensis = _makensis()
-        if cls.makensis is None:
-            raise unittest.SkipTest(
-                "NSIS 3.12 is required to compile the uninstall mutex probe"
-            )
-
-    def _compile_nsi(self, source: Path) -> None:
-        done = subprocess.run(
-            [str(self.makensis), "/V2", "/WX", str(source)],
-            cwd=source.parent,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if done.returncode != 0:
-            self.fail(
-                f"makensis failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
-            )
-
-    def _compile_stop_stub(self, dest: Path) -> None:
-        script = dest.with_suffix(".nsi")
-        script.write_text(
-            "Unicode True\n"
-            "RequestExecutionLevel user\n"
-            "SilentInstall silent\n"
-            'Name "SandglassStopStub"\n'
-            f'OutFile "{_nsi_path(dest)}"\n'
-            "Function .onInit\n"
-            "  SetSilent silent\n"
-            "FunctionEnd\n"
-            "Section\n"
-            "SectionEnd\n",
-            encoding="utf-8-sig",
-        )
-        self._compile_nsi(script)
-
-    def _prepare_probe(self, root: Path, restore_rename: bool) -> _UninstallProbe:
-        token = uuid.uuid4().hex
-        install_dir = root / "installed"
-        shortcut_dir = root / "start-menu"
-        setup_exe = root / "probe-setup.exe"
-        stub_exe = root / "Sandglass.exe"
-        nsi_path = root / "probe.nsi"
-        install_dir.mkdir(parents=True)
-        shortcut_dir.mkdir()
-        self._compile_stop_stub(stub_exe)
-
-        source = (ROOT / "packaging" / "sandglass.nsi").read_text(encoding="utf-8")
-        observer_fn = _nsi_function(source, "un.CheckSandglassMutex")
-        desktop_fn = _nsi_function(source, "un.CheckSandglassDesktopMutex")
-        uninstall = _nsi_uninstall_section(source)
-        if restore_rename:
-            uninstall = _restore_rename_desktop_gate(uninstall)
-            self.assertNotIn("Call un.CheckSandglassDesktopMutex", uninstall)
-            self.assertIn("Sandglass.exe.removing", uninstall)
-
-        desktop_mutex = f"Local\\Sandglass.UninstallProbe.Desktop.{token}"
-        observer_mutex = f"Local\\Sandglass.UninstallProbe.Observer.{token}"
-        product_key = f"Software\\SandglassUninstallProbe_{token}"
-        uninstall_key = (
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\"
-            f"SandglassUninstallProbe_{token}"
-        )
-        run_value = f"sandglass-uninstall-probe-{token}"
-        observer_fn = observer_fn.replace(
-            r"Local\Sandglass.Observer.SingleInstance", observer_mutex
-        )
-        desktop_fn = desktop_fn.replace(
-            r"Local\Sandglass.Desktop.SingleInstance", desktop_mutex
-        )
-        uninstall = (
-            uninstall.replace(
-                r'HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Sandglass"',
-                f'HKCU "{uninstall_key}"',
-            )
-            .replace(
-                r'HKCU "Software\Sandglass"',
-                f'HKCU "{product_key}"',
-            )
-            .replace(
-                r'HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "sandglass"',
-                f'HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "{run_value}"',
-            )
-            .replace(
-                r'Delete "$SMPROGRAMS\Sandglass\Sandglass.lnk"',
-                f'Delete "{(shortcut_dir / "Sandglass.lnk").resolve()}"',
-            )
-            .replace(
-                r'RMDir "$SMPROGRAMS\Sandglass"',
-                f'RMDir "{shortcut_dir.resolve()}"',
-            )
-        )
-
-        nsi_path.write_text(
-            "Unicode True\n"
-            "RequestExecutionLevel user\n"
-            '!include "LogicLib.nsh"\n'
-            'Name "SandglassUninstallProbe"\n'
-            f'OutFile "{_nsi_path(setup_exe)}"\n'
-            f'InstallDir "{_nsi_path(install_dir)}"\n'
-            "SilentInstall silent\n"
-            "Section\n"
-            '  SetOutPath "$INSTDIR"\n'
-            r'  WriteUninstaller "$INSTDIR\Uninstall.exe"'
-            "\nSectionEnd\n\n"
-            f"{observer_fn}\n\n"
-            f"{'' if restore_rename else desktop_fn + chr(10) + chr(10)}"
-            f"{uninstall}\n",
-            encoding="utf-8-sig",
-        )
-        self._compile_nsi(nsi_path)
-        setup = subprocess.run(
-            [str(setup_exe), "/S", f"/D={install_dir}"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(setup.returncode, 0, setup.stderr or setup.stdout)
-        uninstaller = install_dir / "Uninstall.exe"
-        self.assertTrue(uninstaller.is_file(), "probe uninstaller was not written")
-
-        shutil.copy2(stub_exe, install_dir / "Sandglass.exe")
-        (install_dir / "LICENSE").write_text("license", encoding="utf-8")
-        (install_dir / "PRIVACY.md").write_text("privacy", encoding="utf-8")
-        (install_dir / "SUPPORT.md").write_text("support", encoding="utf-8")
-        (install_dir / "THIRD_PARTY_NOTICES.md").write_text("notices", encoding="utf-8")
-        (install_dir / "Sandglass-owned-paths.json").write_text("{}", encoding="utf-8")
-        (install_dir / ".sandglass-owner").write_text("owner", encoding="utf-8")
-        (install_dir / "_internal").mkdir()
-        (install_dir / "_internal" / "payload.bin").write_bytes(b"internal")
-        (install_dir / "THIRD_PARTY_LICENSES").mkdir()
-        (install_dir / "THIRD_PARTY_LICENSES" / "notice.txt").write_text(
-            "third", encoding="utf-8"
-        )
-        (install_dir / "owner-custom").mkdir()
-        (install_dir / "owner-custom" / "keep.txt").write_text("keep", encoding="utf-8")
-        (shortcut_dir / "Sandglass.lnk").write_bytes(b"shortcut")
-
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, product_key) as key:
-            winreg.SetValueEx(key, "InstallDir", 0, winreg.REG_SZ, str(install_dir))
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, uninstall_key) as key:
-            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Sandglass")
-            winreg.SetValueEx(
-                key, "UninstallString", 0, winreg.REG_SZ, str(uninstaller)
-            )
-        with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-        ) as key:
-            winreg.SetValueEx(
-                key,
-                run_value,
-                0,
-                winreg.REG_SZ,
-                f'"{install_dir / "Sandglass.exe"}"',
-            )
-
-        shortcut = shortcut_dir / "Sandglass.lnk"
-        probe = _UninstallProbe(
-            install_dir=install_dir,
-            uninstaller=uninstaller,
-            shortcut=shortcut,
-            desktop_mutex=desktop_mutex,
-            product_key=product_key,
-            uninstall_key=uninstall_key,
-            run_value=run_value,
-            files_before=_tree_snapshot(install_dir),
-            shortcut_before=shortcut.read_bytes(),
-            reg_before={},
-        )
-        probe.reg_before = probe.registration()
-        self.assertEqual(probe.reg_before["install_dir"], str(install_dir))
-        self.assertEqual(probe.reg_before["display_name"], "Sandglass")
-        self.assertIsNotNone(probe.reg_before["run"])
-        return probe
-
-    def _run_uninstaller(self, probe: _UninstallProbe, env: dict[str, str]):
-        return subprocess.run(
-            [str(probe.uninstaller), "/S", f"_?={probe.install_dir}"],
-            cwd=str(probe.install_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-
-    def test_held_desktop_mutex_refuses_uninstall_and_stopped_uninstall_still_succeeds(
-        self,
-    ):
-        """A held desktop mutex must fail closed before any product deletion.
-
-        The rename-based gate accepted this state: Windows allows renaming a
-        loaded PyInstaller Sandglass.exe, so Uninstall.exe /S returned 0 and
-        deleted registration, Run, shortcuts, and most files while the panel
-        kept running. Restoring that rename probe must make this test fail
-        specifically because that partial uninstall is accepted.
-        """
-        with tempfile.TemporaryDirectory(prefix="sg-uninst-") as tmp:
-            root = Path(tmp)
-            sandglass_home = root / "sandglass-home"
-            sandglass_home.mkdir()
-            home_before = _tree_snapshot(sandglass_home)
-            env = os.environ.copy()
-            env["SANDGLASS_HOME"] = str(sandglass_home)
-
-            correct = self._prepare_probe(root / "correct", restore_rename=False)
-            try:
-                with _HeldMutex(correct.desktop_mutex):
-                    refused = self._run_uninstaller(correct, env)
-                    self.assertEqual(
-                        refused.returncode,
-                        9,
-                        refused.stdout + refused.stderr,
-                    )
-                    self.assertEqual(
-                        _tree_snapshot(correct.install_dir), correct.files_before
-                    )
-                    self.assertEqual(correct.registration(), correct.reg_before)
-                    self.assertTrue((correct.install_dir / "Sandglass.exe").is_file())
-                    self.assertTrue((correct.install_dir / "Uninstall.exe").is_file())
-                    self.assertTrue(
-                        (correct.install_dir / "owner-custom" / "keep.txt").is_file()
-                    )
-                    self.assertEqual(
-                        correct.shortcut.read_bytes(), correct.shortcut_before
-                    )
-                    self.assertEqual(_tree_snapshot(sandglass_home), home_before)
-
-                succeeded = self._run_uninstaller(correct, env)
-                self.assertEqual(
-                    succeeded.returncode, 0, succeeded.stdout + succeeded.stderr
-                )
-                self.assertFalse((correct.install_dir / "Sandglass.exe").exists())
-                self.assertFalse((correct.install_dir / "_internal").exists())
-                self.assertFalse(
-                    (correct.install_dir / "THIRD_PARTY_LICENSES").exists()
-                )
-                self.assertTrue(
-                    (correct.install_dir / "owner-custom" / "keep.txt").is_file()
-                )
-                self.assertIsNone(correct.registration()["install_dir"])
-                self.assertIsNone(correct.registration()["display_name"])
-                self.assertIsNone(correct.registration()["run"])
-                self.assertFalse(correct.shortcut.exists())
-                self.assertEqual(_tree_snapshot(sandglass_home), home_before)
-            finally:
-                correct.cleanup_registry()
-
-            mutated = self._prepare_probe(root / "mutated", restore_rename=True)
-            try:
-                with _HeldMutex(mutated.desktop_mutex):
-                    accepted = self._run_uninstaller(mutated, env)
-
-                    def assert_held_mutex_refuses() -> None:
-                        self.assertNotEqual(accepted.returncode, 0)
-                        self.assertEqual(
-                            _tree_snapshot(mutated.install_dir),
-                            mutated.files_before,
-                        )
-                        self.assertEqual(
-                            mutated.registration(), mutated.reg_before
-                        )
-                        self.assertTrue(mutated.shortcut.is_file())
-                        self.assertEqual(
-                            mutated.shortcut.read_bytes(), mutated.shortcut_before
-                        )
-
-                    with self.assertRaises(AssertionError):
-                        assert_held_mutex_refuses()
-                    self.assertEqual(
-                        accepted.returncode,
-                        0,
-                        "rename-gate mutation must accept uninstall while the "
-                        f"desktop mutex is held, got {accepted.returncode}",
-                    )
-                    self.assertFalse(
-                        (mutated.install_dir / "Sandglass.exe").exists(),
-                        "rename-gate mutation must delete product files while "
-                        "the desktop mutex is held",
-                    )
-                    self.assertIsNone(
-                        mutated.registration()["run"],
-                        "rename-gate mutation must delete registration while "
-                        "the desktop mutex is held",
-                    )
-                    self.assertFalse(
-                        mutated.shortcut.exists(),
-                        "rename-gate mutation must delete the shortcut while "
-                        "the desktop mutex is held",
-                    )
-                    self.assertEqual(_tree_snapshot(sandglass_home), home_before)
-            finally:
-                mutated.cleanup_registry()
 
 
 if __name__ == "__main__":

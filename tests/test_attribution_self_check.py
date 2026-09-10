@@ -418,6 +418,9 @@ class DesktopLifecycleContextTests(unittest.TestCase):
             def activate(self):
                 return None
 
+            def quit(self):
+                return True
+
             def toggle_panel(self):
                 return None
 

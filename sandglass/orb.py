@@ -38,8 +38,8 @@ AC_SRC_OVER, AC_SRC_ALPHA = 0x00, 0x01
 WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE = 0x0002, 0x0201, 0x0202, 0x0200
 WM_RBUTTONUP, WM_CLOSE, WM_APP = 0x0205, 0x0010, 0x8000
 WM_DPICHANGED = 0x02E0
-WM_ORB_HIDE, WM_ORB_SHOW, WM_ORB_QUIT, WM_ORB_MOVE, WM_ORB_ACTIVATE = (
-    WM_APP + 1, WM_APP + 2, WM_APP + 3, WM_APP + 4, WM_APP + 5)
+WM_ORB_HIDE, WM_ORB_SHOW, WM_ORB_QUIT, WM_ORB_MOVE, WM_ORB_ACTIVATE, WM_ORB_UNINSTALL = (
+    WM_APP + 1, WM_APP + 2, WM_APP + 3, WM_APP + 4, WM_APP + 5, WM_APP + 6)
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0004, 0x0010
 HWND_TOPMOST = -1
 DRAG_SLOP = 4  # px of travel that turns a click into a drag
@@ -725,6 +725,7 @@ class Orb:
                  on_drag_start: Callable[[], None] | None = None,
                  on_move: Callable[[int, int], None] | None = None,
                  *, master_image: Image.Image | None = None,
+                 on_uninstall: Callable[[], None] | None = None,
                  logical_size: int = 56,
                  start_visible: bool = True) -> None:
         self.image = image
@@ -734,6 +735,7 @@ class Orb:
         self._start_visible = bool(start_visible)
         self.on_click = on_click
         self.on_activate = on_activate
+        self.on_uninstall = on_uninstall
         self.on_menu = on_menu
         self.on_drag_start = on_drag_start
         self.on_move = on_move
@@ -767,6 +769,10 @@ class Orb:
     def post_quit(self) -> None:
         if self.hwnd:
             user32.PostMessageW(self.hwnd, WM_ORB_QUIT, 0, 0)
+
+    def post_uninstall(self) -> None:
+        if self.hwnd:
+            user32.PostMessageW(self.hwnd, WM_ORB_UNINSTALL, 0, 0)
 
     def post_move(self, x: int, y: int, *, animate: bool = False) -> None:
         """Move from another UI thread without touching the Win32 window there."""
@@ -974,6 +980,10 @@ class Orb:
             # an already-open panel closed. Keep UI work off the window proc.
             threading.Thread(target=self._fire_activate, daemon=True).start()
             return 0
+        if msg == WM_ORB_UNINSTALL:
+            if self.on_uninstall:
+                threading.Thread(target=self.on_uninstall, daemon=True).start()
+            return 0
         if msg == WM_ORB_MOVE:
             with self._move_lock:
                 move, self._pending_move = self._pending_move, None
@@ -1006,6 +1016,18 @@ def activate_existing_orb(timeout: float = 5.0) -> bool:
     while True:
         hwnd = user32.FindWindowW("SandglassOrb", "sandglass")
         if hwnd and user32.PostMessageW(hwnd, WM_ORB_ACTIVATE, 0, 0):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def request_existing_orb_uninstall(timeout: float = 5.0) -> bool:
+    """Request the existing desktop shell to close for an uninstall."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        hwnd = user32.FindWindowW("SandglassOrb", "sandglass")
+        if hwnd and user32.PostMessageW(hwnd, WM_ORB_UNINSTALL, 0, 0):
             return True
         if time.monotonic() >= deadline:
             return False

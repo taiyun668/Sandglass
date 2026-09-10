@@ -37,7 +37,9 @@ from sandglass.desktop import (
     _webview_start_options,
     main as desktop_main,
 )
-from sandglass.orb import WM_ORB_ACTIVATE, activate_existing_orb, animate_window_reveal
+from sandglass.orb import (WM_ORB_ACTIVATE, WM_ORB_UNINSTALL,
+                           activate_existing_orb, animate_window_reveal,
+                           request_existing_orb_uninstall)
 from sandglass.paths import StateHomeAttestationError
 
 
@@ -631,6 +633,18 @@ class DesktopWindowControlTests(unittest.TestCase):
 
         user32.FindWindowW.assert_called_once_with("SandglassOrb", "sandglass")
         user32.PostMessageW.assert_called_once_with(456, WM_ORB_ACTIVATE, 0, 0)
+
+    def test_uninstall_posts_a_distinct_quit_request(self):
+        user32 = Mock()
+        user32.FindWindowW.return_value = 456
+        user32.PostMessageW.return_value = True
+
+        with patch("sandglass.orb.user32", user32):
+            self.assertIs(request_existing_orb_uninstall(timeout=0), True)
+
+        user32.FindWindowW.assert_called_once_with("SandglassOrb", "sandglass")
+        user32.PostMessageW.assert_called_once_with(456, WM_ORB_UNINSTALL, 0, 0)
+        self.assertNotEqual(WM_ORB_UNINSTALL, WM_ORB_ACTIVATE)
 
     @patch("sandglass.desktop.activate_existing_orb")
     @patch("sandglass.desktop.runtime_identity_matches", return_value=True)
