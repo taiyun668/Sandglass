@@ -9,6 +9,10 @@ and reset times in one place.
 Data stays on this computer and is not uploaded. Sandglass does not switch
 accounts, refresh credentials, or modify provider directories.
 
+**Multilingual UI — 10 languages.** Sandglass follows the Windows system
+language on first use, and you can switch languages at any time from the app
+menu: **English · 简体中文 · 繁體中文 · Español · Français · Deutsch · Português (Brasil) · Русский · 日本語 · 한국어**.
+
 ## Download for Windows 10/11 x64
 
 ### [Download the installer — recommended](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/Sandglass-0.1.6-windows-x64-unsigned-setup.exe)

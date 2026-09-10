@@ -6,6 +6,9 @@
 
 数据留在本机，不上传；Sandglass 不切换账号、不刷新凭据，也不修改厂商目录。
 
+**多语言 UI——完整支持 10 种语言。** 首次使用时自动跟随 Windows 系统语言，
+之后可随时从应用菜单切换：**English · 简体中文 · 繁體中文 · Español · Français · Deutsch · Português (Brasil) · Русский · 日本語 · 한국어**。
+
 ## 下载 Windows 10/11 x64 版
 
 ### [下载安装包——推荐](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/Sandglass-0.1.6-windows-x64-unsigned-setup.exe)
