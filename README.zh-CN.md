@@ -21,8 +21,11 @@
 不想安装时选择这个版本。请先解压完整 ZIP，进入 `Sandglass` 文件夹，再运行
 `Sandglass.exe`；不要直接在压缩包里运行。便携版以后通过应用内升级时，会按设计转入安装版通道。
 
-Sandglass 目前是未签名的社区版本，因此 Windows 首次安装时可能显示**未知发布者**确认。
-如果 Smart App Control 直接阻止安装，请改用便携 ZIP，不要关闭 Windows 安全功能。
+> **Windows Smart App Control：**Sandglass 目前没有 Authenticode 代码签名。
+> 当 Smart App Control 处于强制模式时，Windows 可能同时阻止安装包和便携 ZIP
+> 内的可执行文件，而且没有针对单个应用的“仍要运行”选项。不要为了安装 Sandglass
+> 而关闭 Windows 安全功能。Owner 签名的校验清单能证明发布资产未被篡改，
+> 但它不是 Windows 受信任发布者签名。
 
 [更新说明和全部文件](https://github.com/taiyun668/Sandglass/releases/latest)
 · [SHA-256 校验清单](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/SHA256SUMS.windows)
@@ -147,7 +150,8 @@ Windows x64 unsigned 版本可从
 [GitHub Releases](https://github.com/taiyun668/Sandglass/releases)
 下载 per-user 安装包和 portable ZIP。首次运行时 Windows 通常会要求确认；预览版不是稳定版，
 随包的可执行文件仍未做 Authenticode 签名。启用 Smart App Control 的 Windows 可能直接
-拦截 unsigned setup；这时不要关闭系统安全策略，该机器只能尝试 portable ZIP。
+拦截 unsigned setup 和 portable ZIP 内的可执行文件。Smart App Control 不支持针对
+单个应用放行；不要为了安装 Sandglass 而关闭系统安全策略。
 后续更新只有在下载内容与带维护者签名的
 `SHA256SUMS.windows` 清单匹配后才会交给安装器。仍可从源码 checkout 运行：
 

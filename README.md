@@ -28,9 +28,12 @@ Choose this if you do not want to install. Extract the entire ZIP, open the
 ZIP. A later in-app update intentionally moves a portable copy to the installed
 channel.
 
-Sandglass is currently an unsigned community build, so Windows may show an
-**Unknown publisher** confirmation on first installation. If Smart App Control
-blocks it outright, use the portable ZIP; do not disable Windows security.
+> **Windows Smart App Control:** Sandglass is currently not
+> Authenticode-signed. When Smart App Control is enforcing, Windows may block
+> both the installer and the executable inside the portable ZIP, with no
+> per-app **Run anyway** option. Do not disable Windows security just to install
+> Sandglass. The Owner-signed checksum manifest proves release integrity, but
+> it is not a Windows trusted-publisher signature.
 
 [Release notes and all files](https://github.com/taiyun668/Sandglass/releases/latest)
 · [SHA-256 checksums](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/SHA256SUMS.windows)
@@ -199,8 +202,9 @@ The unsigned Windows x64 build can be downloaded from
 as a per-user installer and a portable ZIP. Windows usually asks for
 confirmation on first run. Preview builds are not stable releases, and the
 shipped executables are still not Authenticode-signed. Windows with Smart App
-Control enabled may block the unsigned setup outright. In that case do not turn
-off system security policy; that machine can only try the portable ZIP.
+Control enabled may block both the unsigned setup and the executable in the
+portable ZIP outright. Smart App Control has no per-app bypass; do not turn off
+system security policy just to install Sandglass.
 Later updates are handed to the installer only after the download matches the
 maintainer-signed `SHA256SUMS.windows` manifest. You can still run from a source
 checkout:
