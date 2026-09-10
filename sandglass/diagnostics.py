@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ _ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK = threading.Lock()
 _ATTRIBUTION_SELF_CHECK_HEARTBEAT = {
     "last_ok_at": None,
     "check_count": 0,
+    "state": "pending",
+    "reason": "",
 }
 _BLOCKED_TEXT = (
     "application control policy",
@@ -130,13 +133,75 @@ def runtime_diagnostics() -> dict[str, Any]:
     }
 
 
-def record_attribution_self_check_success() -> None:
-    """Record one successful attribution self-check in process memory only."""
+def attribution_self_check_events_path() -> Path:
+    return meter_home() / "attribution-self-check-events.jsonl"
+
+
+def _append_attribution_self_check_event(event: dict[str, Any]) -> None:
+    """Append one durable transition line, serialized across processes.
+
+    This is a distinct log from runtime-diagnostics.json on purpose: that file
+    is overwritten on every clear_component_failure, so a drift that
+    self-heals before anyone looks leaves nothing behind. This file is never
+    truncated, rotated, or capped -- a line, once appended, stays.
+    """
+    from sandglass.accounts import state_file_lock
+
+    path = attribution_self_check_events_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with state_file_lock(path, lock_name=".attribution-self-check-events.lock"):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
+    except OSError as exc:
+        # Not raised: this is bookkeeping beside a self-check result, and the
+        # caller (a watcher loop, or an except handler already reporting its
+        # own failure) must not be broken by a failure to log about it.
+        record_component_failure("attribution_self_check_event_write", exc)
+
+
+def record_attribution_self_check_result(state: str, reason: str = "") -> None:
+    """Record one attribution self-check transition.
+
+    The heartbeat's last_ok_at/check_count only ever tracked liveness in
+    process memory, and runtime-diagnostics.json only ever holds the current
+    component state -- the next success clears it. Together they cannot answer
+    "did this drift and then recover" once it has recovered. This appends one
+    line to attribution-self-check-events.jsonl exactly when (state, reason)
+    changes from what this process last recorded, so a self-healing episode
+    survives on disk. Unchanged results append nothing.
+    """
     with _ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
-        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["last_ok_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
-        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["check_count"] += 1
+        previous = (
+            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["state"],
+            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["reason"],
+        )
+        if state == "ok":
+            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["last_ok_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["check_count"] += 1
+        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["state"] = state
+        _ATTRIBUTION_SELF_CHECK_HEARTBEAT["reason"] = reason
+        check_count = _ATTRIBUTION_SELF_CHECK_HEARTBEAT["check_count"]
+        changed = previous != (state, reason)
+    if not changed:
+        return
+    event = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "state": state,
+        "reason": reason,
+        "check_count": check_count,
+    }
+    _append_attribution_self_check_event(event)
+
+
+def record_attribution_self_check_success() -> None:
+    """Record one successful attribution self-check. Thin wrapper kept for callers."""
+    record_attribution_self_check_result("ok")
 
 
 def attribution_self_check_heartbeat() -> dict[str, Any]:

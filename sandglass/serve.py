@@ -1898,7 +1898,11 @@ def _self_check_window_projection(
 def _check_attribution_self_check() -> bool:
     """Compare cached Codex attribution with an independent direct-disk replay."""
     from sandglass import live_snapshot
-    from sandglass.diagnostics import clear_component_failure, record_component_failure
+    from sandglass.diagnostics import (
+        clear_component_failure,
+        record_attribution_self_check_result,
+        record_component_failure,
+    )
     from sandglass.paths import meter_home
 
     # The observer must never clear a panel's attribution result.  An unset
@@ -1908,6 +1912,7 @@ def _check_attribution_self_check() -> bool:
 
     def fail(reason: str) -> bool:
         record_component_failure("attribution_self_check", RuntimeError(reason))
+        record_attribution_self_check_result("fail", reason)
         return False
 
     with _REPORT_LOCK:
@@ -1995,6 +2000,8 @@ def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thre
     """Run the panel-only attribution replay independently of quota polling."""
     from sandglass import live_snapshot
     from sandglass.diagnostics import (
+        attribution_self_check_heartbeat,
+        record_attribution_self_check_result,
         record_attribution_self_check_success,
         record_component_failure,
     )
@@ -2009,6 +2016,15 @@ def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thre
             except Exception as exc:  # noqa: BLE001 - self-check must not kill panel
                 if getattr(live_snapshot, "_ROLE", "") == "panel":
                     record_component_failure("attribution_self_check", exc)
+                    # Never str(exc): it can carry a filesystem path or account
+                    # data. Only the exception's type name is safe to log.
+                    record_attribution_self_check_result(
+                        "fail", f"exception:{type(exc).__name__}"
+                    )
+            if getattr(live_snapshot, "_ROLE", "") == "panel":
+                live_snapshot.record(
+                    "attribution_self_check", attribution_self_check_heartbeat()
+                )
             if stop.wait(_SNAPSHOT_WATCH_SECONDS):
                 return
 

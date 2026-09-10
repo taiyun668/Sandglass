@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -83,7 +84,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
         with diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
             saved = dict(diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT)
             diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT.update(
-                last_ok_at=None, check_count=0
+                last_ok_at=None, check_count=0, state="pending", reason=""
             )
         try:
             yield diagnostics
@@ -127,6 +128,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
         path.write_text("{", encoding="utf-8")
         with patch("sandglass.diagnostics.record_component_failure") as record, \
              patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
              patch("sandglass.accounts.identity_source_stamp", return_value=self.stamp):
             self.assertFalse(self.serve._check_attribution_self_check())
             record.assert_called_once()
@@ -137,6 +139,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
             "evidence": {"readable": True, "stable_snapshot": False},
         }), patch("sandglass.diagnostics.record_component_failure") as record, \
              patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
              patch("sandglass.accounts.identity_source_stamp", return_value=self.stamp):
             self.assertFalse(self.serve._check_attribution_self_check())
             record.assert_called_once()
@@ -201,7 +204,8 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch.object(self.serve, "collect_all", side_effect=AssertionError), \
              patch.object(self.serve, "load_accounts", side_effect=AssertionError), \
              patch.object(self.serve, "attach_live_quota", side_effect=AssertionError), \
-             patch.object(self.serve, "_check_attribution_self_check", side_effect=check):
+             patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter):
             watcher = self.serve._start_attribution_self_check_watch(stop)
             watcher.join(timeout=2)
         self.assertFalse(watcher.is_alive())
@@ -212,7 +216,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
             self.assertTrue(self._check())
             self.assertEqual(
                 diagnostics.attribution_self_check_heartbeat(),
-                {"last_ok_at": None, "check_count": 0},
+                {"last_ok_at": None, "check_count": 0, "state": "pending", "reason": ""},
             )
 
     def test_j_success_heartbeat_is_a_copy_and_failure_does_not_reset_it(self):
@@ -240,7 +244,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
             self.assertFalse(watcher.is_alive())
             self.assertEqual(
                 diagnostics.attribution_self_check_heartbeat(),
-                {"last_ok_at": None, "check_count": 0},
+                {"last_ok_at": None, "check_count": 0, "state": "pending", "reason": ""},
             )
 
     def test_j_real_http_watcher_heartbeat_advances_and_stops(self):
@@ -250,6 +254,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
         with self._fresh_heartbeat() as diagnostics, \
              patch("sandglass.paths.meter_home", return_value=self.meter), \
              patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter), \
              patch.object(self.serve, "_SNAPSHOT_WATCH_SECONDS", interval):
             diagnostics.record_component_failure(
                 "preexisting", RuntimeError("keep these bytes")
@@ -329,7 +334,8 @@ class AttributionSelfCheckTests(unittest.TestCase):
             self.assertFalse(self.serve._local_cache["payload"])
 
         with patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \
-             patch("sandglass.diagnostics.record_component_failure") as record:
+             patch("sandglass.diagnostics.record_component_failure") as record, \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter):
             watcher = self.serve._start_attribution_self_check_watch(stop)
             watcher.join(timeout=2)
         self.assertFalse(watcher.is_alive())
@@ -341,7 +347,8 @@ class AttributionSelfCheckTests(unittest.TestCase):
         def check():
             stop_seen.append(True)
 
-        with patch.object(self.serve, "_check_attribution_self_check", side_effect=check):
+        with patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter):
             with self.assertRaises(RuntimeError):
                 with self.serve._attribution_self_check_watch_context():
                     raise RuntimeError("ui loop failed")
@@ -373,6 +380,119 @@ class AttributionSelfCheckTests(unittest.TestCase):
             self.assertTrue(serve._check_attribution_self_check())
         record.assert_not_called()
         clear.assert_called_once_with("attribution_self_check")
+
+    def test_l_event_log_records_only_transitions(self):
+        with self._fresh_heartbeat() as diagnostics, \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter):
+            diagnostics.record_attribution_self_check_result("ok")
+            diagnostics.record_attribution_self_check_result("ok")
+            diagnostics.record_attribution_self_check_result("fail", "A")
+            diagnostics.record_attribution_self_check_result("fail", "A")
+            diagnostics.record_attribution_self_check_result("fail", "B")
+            diagnostics.record_attribution_self_check_result("ok")
+
+            lines = diagnostics.attribution_self_check_events_path().read_text(
+                encoding="utf-8"
+            ).splitlines()
+            events = [json.loads(line) for line in lines]
+
+        self.assertEqual(len(events), 4)
+        self.assertEqual(
+            [(event["state"], event["reason"]) for event in events],
+            [("ok", ""), ("fail", "A"), ("fail", "B"), ("ok", "")],
+        )
+        # check_count advances on every "ok" heartbeat update, logged or not
+        # (the second, unlogged "ok" still counts); "fail" never moves it.
+        self.assertEqual([event["check_count"] for event in events], [1, 2, 2, 3])
+        self.assertTrue(all(event["pid"] == os.getpid() for event in events))
+
+    def test_l_exception_reason_is_type_name_only_no_message_or_path(self):
+        from sandglass import diagnostics
+
+        stop = threading.Event()
+        secret_path = "C:\\Users\\someone\\secret-account-file"
+
+        def check():
+            stop.set()
+            raise KeyError(secret_path)
+
+        with self._fresh_heartbeat() as diagnostics, \
+             patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \
+             patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter):
+            watcher = self.serve._start_attribution_self_check_watch(stop)
+            watcher.join(timeout=2)
+            self.assertFalse(watcher.is_alive())
+
+            raw_text = diagnostics.attribution_self_check_events_path().read_text(
+                encoding="utf-8"
+            )
+
+        events = [json.loads(line) for line in raw_text.splitlines()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["state"], "fail")
+        self.assertEqual(events[0]["reason"], "exception:KeyError")
+        self.assertNotIn(secret_path, raw_text)
+        self.assertNotIn("secret", raw_text)
+
+    def test_l_check_failure_and_recovery_both_reach_disk(self):
+        # Mirrors _start_attribution_self_check_watch's own loop body: the
+        # direct checker only ever logs a "fail" (test_j establishes it never
+        # advances the success heartbeat on its own); "ok" reaches the log
+        # the same way it reaches the heartbeat in production, through the
+        # watcher's record_attribution_self_check_success() wrapper.
+        from sandglass.diagnostics import record_attribution_self_check_success
+
+        with self._fresh_heartbeat() as diagnostics, \
+             patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter):
+            self.window["usage"]["total_tokens"] = 11
+            self.assertFalse(self.serve._check_attribution_self_check())
+
+            self.window["usage"]["total_tokens"] = 10
+            recovered = self.serve._check_attribution_self_check()
+            self.assertTrue(recovered)
+            if recovered:
+                record_attribution_self_check_success()
+
+            lines = diagnostics.attribution_self_check_events_path().read_text(
+                encoding="utf-8"
+            ).splitlines()
+            events = [json.loads(line) for line in lines]
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["state"], "fail")
+        self.assertEqual(
+            events[0]["reason"], "attribution self-check attribution facts disagree"
+        )
+        self.assertEqual(events[1]["state"], "ok")
+        self.assertEqual(events[1]["reason"], "")
+
+    def test_l_watcher_iteration_writes_heartbeat_into_live_snapshot(self):
+        from sandglass import live_snapshot
+
+        stop = threading.Event()
+
+        def check():
+            stop.set()
+            return True
+
+        with self._fresh_heartbeat(), \
+             patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \
+             patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter):
+            watcher = self.serve._start_attribution_self_check_watch(stop)
+            watcher.join(timeout=2)
+            self.assertFalse(watcher.is_alive())
+
+            snapshot_file = self.meter / f"{live_snapshot.PREFIX}{os.getpid()}.json"
+            stored = json.loads(snapshot_file.read_text(encoding="utf-8"))
+
+        reading = stored["readings"]["attribution_self_check"]
+        self.assertEqual(reading["value"]["state"], "ok")
+        self.assertEqual(reading["value"]["check_count"], 1)
 
 
 class _ContextProbe:
