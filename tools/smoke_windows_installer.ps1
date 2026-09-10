@@ -89,6 +89,29 @@ function Wait-DirectProcessExit([System.Diagnostics.Process]$Process,
     return [int]$ownExitCode
 }
 
+function Get-OptionalRegistryValue([string]$SubKey, [string]$ValueName) {
+    $key = $null
+    try {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($SubKey, $false)
+        if ($null -eq $key) { return $null }
+        if (-not ($key.GetValueNames() -contains $ValueName)) { return $null }
+        $kind = $key.GetValueKind($ValueName)
+        $value = $key.GetValue(
+            $ValueName, $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        return [pscustomobject]@{
+            Exists = $true
+            Value = $value
+            Kind = $kind
+        }
+    } catch {
+        throw "Could not read HKCU\\$SubKey value '$ValueName': $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $key) { $key.Dispose() }
+    }
+}
+
 # The silent path now starts Sandglass when it finishes, and this script
 # asserts that it did. Those assertions only mean something when no existing
 # Sandglass process can answer in place of the installed copy. The desktop
@@ -113,6 +136,7 @@ Assert-MutexAvailable $observerMutexName (
 # Sandglass Run value is owner-controlled startup state; do not overwrite one
 # that existed before this smoke.
 $runKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runKeySubKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
 $runValueName = 'sandglass'
 $runKeyExisted = Test-Path -LiteralPath $runKeyPath -PathType Container
 foreach ($key in @('HKCU:\Software\Sandglass',
@@ -121,9 +145,8 @@ foreach ($key in @('HKCU:\Software\Sandglass',
         throw "Installer smoke requires no existing Sandglass registration: $key"
     }
 }
-$existingSandglassRun = Get-ItemPropertyValue -LiteralPath $runKeyPath `
-    -Name $runValueName -ErrorAction SilentlyContinue
-if ($null -ne $existingSandglassRun) {
+$existingSandglassRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+if ($null -ne $existingSandglassRun -and $existingSandglassRun.Exists) {
     throw "Installer smoke requires no pre-existing Sandglass Run value."
 }
 
@@ -326,9 +349,8 @@ try {
         New-Item -Path $runKeyPath -Force | Out-Null
         $runKeyCreated = $true
     }
-    $priorUnrelatedRun = Get-ItemPropertyValue -LiteralPath $runKeyPath `
-        -Name $unrelatedRunName -ErrorAction SilentlyContinue
-    if ($null -ne $priorUnrelatedRun) {
+    $priorUnrelatedRun = Get-OptionalRegistryValue $runKeySubKey $unrelatedRunName
+    if ($null -ne $priorUnrelatedRun -and $priorUnrelatedRun.Exists) {
         throw "Unexpected collision with smoke Run value: $unrelatedRunName"
     }
     New-ItemProperty -LiteralPath $runKeyPath -Name $unrelatedRunName `
@@ -461,15 +483,16 @@ try {
     # create the fixture-owned startup value.  The unrelated value was written
     # before install and must survive every installer/uninstaller path.
     $fixtureRunValue = '"' + $installedExe + '" --background'
-    if ($null -ne (Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $runValueName `
-            -ErrorAction SilentlyContinue)) {
+    $existingInstalledRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+    if ($null -ne $existingInstalledRun -and $existingInstalledRun.Exists) {
         throw "Installer unexpectedly created a Sandglass Run value before the fixture was set."
     }
     Set-ItemProperty -LiteralPath $runKeyPath -Name $runValueName `
         -Value $fixtureRunValue
     $fixtureRunCreated = $true
-    if ((Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $unrelatedRunName) `
-            -cne $unrelatedRunValue) {
+    $installedUnrelatedRun = Get-OptionalRegistryValue $runKeySubKey $unrelatedRunName
+    if ($null -eq $installedUnrelatedRun -or
+        $installedUnrelatedRun.Value -cne $unrelatedRunValue) {
         throw "Installer changed the unrelated Run value."
     }
 
@@ -496,12 +519,13 @@ try {
         "Responsive uninstall left the installed executable behind."
     if (Test-Path -LiteralPath $uninstallKey) { throw "Responsive uninstall left registration behind." }
     if (Test-Path -LiteralPath $desktopShortcut) { throw "Responsive uninstall left desktop shortcut behind." }
-    if ($null -ne (Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $runValueName `
-            -ErrorAction SilentlyContinue)) {
+    $remainingResponsiveRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+    if ($null -ne $remainingResponsiveRun -and $remainingResponsiveRun.Exists) {
         throw "Responsive uninstall left the fixture Sandglass Run value behind."
     }
-    if ((Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $unrelatedRunName `
-            -ErrorAction SilentlyContinue) -cne $unrelatedRunValue) {
+    $responsiveUnrelatedRun = Get-OptionalRegistryValue $runKeySubKey $unrelatedRunName
+    if ($null -eq $responsiveUnrelatedRun -or
+        $responsiveUnrelatedRun.Value -cne $unrelatedRunValue) {
         throw "Responsive uninstall changed the unrelated Run value."
     }
     if (-not (Test-Path -LiteralPath $sandglassHome -PathType Container)) { throw "Uninstall removed SANDGLASS_HOME." }
@@ -535,8 +559,8 @@ try {
         throw "Reinstall uninstall entry does not target Sandglass.exe --uninstall."
     }
     $fixtureRunValue = '"' + $installedExe + '" --background'
-    if ($null -ne (Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $runValueName `
-            -ErrorAction SilentlyContinue)) {
+    $existingReinstallRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+    if ($null -ne $existingReinstallRun -and $existingReinstallRun.Exists) {
         throw "Reinstall unexpectedly created a Sandglass Run value before the fixture was set."
     }
     Set-ItemProperty -LiteralPath $runKeyPath -Name $runValueName `
@@ -568,12 +592,13 @@ try {
         (Get-FileHash -LiteralPath $stateMarker -Algorithm SHA256).Hash -ne $stateHash) {
         throw 'Stopped uninstall changed owner files or state.'
     }
-    if ($null -ne (Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $runValueName `
-            -ErrorAction SilentlyContinue)) {
+    $remainingStoppedRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+    if ($null -ne $remainingStoppedRun -and $remainingStoppedRun.Exists) {
         throw "Stopped uninstall left the fixture Sandglass Run value behind."
     }
-    if ((Get-ItemPropertyValue -LiteralPath $runKeyPath -Name $unrelatedRunName `
-            -ErrorAction SilentlyContinue) -cne $unrelatedRunValue) {
+    $stoppedUnrelatedRun = Get-OptionalRegistryValue $runKeySubKey $unrelatedRunName
+    if ($null -eq $stoppedUnrelatedRun -or
+        $stoppedUnrelatedRun.Value -cne $unrelatedRunValue) {
         throw "Stopped uninstall changed the unrelated Run value."
     }
 
@@ -604,17 +629,17 @@ finally {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
     if ($fixtureRunCreated -and $null -ne $fixtureRunValue) {
-        $currentFixtureRun = Get-ItemPropertyValue -LiteralPath $runKeyPath `
-            -Name $runValueName -ErrorAction SilentlyContinue
-        if ($currentFixtureRun -ceq $fixtureRunValue) {
+        $currentFixtureRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
+        if ($null -ne $currentFixtureRun -and
+            $currentFixtureRun.Exists -and $currentFixtureRun.Value -ceq $fixtureRunValue) {
             Remove-ItemProperty -LiteralPath $runKeyPath -Name $runValueName `
                 -ErrorAction SilentlyContinue
         }
     }
     if ($unrelatedRunCreated) {
-        $currentUnrelatedRun = Get-ItemPropertyValue -LiteralPath $runKeyPath `
-            -Name $unrelatedRunName -ErrorAction SilentlyContinue
-        if ($currentUnrelatedRun -ceq $unrelatedRunValue) {
+        $currentUnrelatedRun = Get-OptionalRegistryValue $runKeySubKey $unrelatedRunName
+        if ($null -ne $currentUnrelatedRun -and
+            $currentUnrelatedRun.Exists -and $currentUnrelatedRun.Value -ceq $unrelatedRunValue) {
             Remove-ItemProperty -LiteralPath $runKeyPath -Name $unrelatedRunName `
                 -ErrorAction SilentlyContinue
         }

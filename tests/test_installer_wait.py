@@ -120,6 +120,53 @@ class InstallerWaitTests(unittest.TestCase):
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
+    def test_optional_registry_value_distinguishes_absence_and_present_empty(self):
+        """Raw RegistryKey reads preserve missing/value-kind semantics."""
+        source = SMOKE.read_text(encoding="utf-8")
+        start = source.index("function Get-OptionalRegistryValue")
+        end = source.index("# The silent path now starts Sandglass", start)
+        function_source = source[start:end]
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-reg-read-") as tmp:
+                token = uuid.uuid4().hex
+                subkey = f"Software\\SandglassTests\\{token}"
+                runner = Path(tmp) / "registry-read.ps1"
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    + function_source
+                    + f"$subKey = '{subkey}'\n"
+                    + "$missingKey = Get-OptionalRegistryValue ($subKey + '\\Missing') 'value'\n"
+                    + "if ($null -ne $missingKey) { exit 21 }\n"
+                    + "$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKey)\n"
+                    + "try {\n"
+                    + "  $missingValue = Get-OptionalRegistryValue $subKey 'missing'\n"
+                    + "  if ($null -ne $missingValue) { exit 22 }\n"
+                    + "  $key.SetValue('present', 'value', [Microsoft.Win32.RegistryValueKind]::String)\n"
+                    + "  $key.SetValue('present-empty', '', [Microsoft.Win32.RegistryValueKind]::String)\n"
+                    + "  $key.SetValue('present-expand', '%SMOKE_TEST%', [Microsoft.Win32.RegistryValueKind]::ExpandString)\n"
+                    + "  $present = Get-OptionalRegistryValue $subKey 'present'\n"
+                    + "  if ($null -eq $present -or -not $present.Exists -or $present.Value -cne 'value') { exit 23 }\n"
+                    + "  $empty = Get-OptionalRegistryValue $subKey 'present-empty'\n"
+                    + "  if ($null -eq $empty -or -not $empty.Exists -or $empty.Value -cne '') { exit 24 }\n"
+                    + "  $expand = Get-OptionalRegistryValue $subKey 'present-expand'\n"
+                    + "  if ($null -eq $expand -or -not $expand.Exists -or $expand.Value -cne '%SMOKE_TEST%') { exit 25 }\n"
+                    + "} finally {\n"
+                    + "  $key.Dispose()\n"
+                    + "  [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($subKey)\n"
+                    + "}\n"
+                    + "exit 0\n",
+                    encoding="utf-8",
+                )
+                done = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(runner)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
+
     def test_direct_process_wait_timeout_reaps_exact_child(self):
         """A known timeout kills/reaps only the process this smoke started."""
         source = SMOKE.read_text(encoding="utf-8")
