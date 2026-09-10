@@ -86,6 +86,54 @@ class InstallerWaitTests(unittest.TestCase):
             function_source.index("return $running"),
         )
 
+    def test_start_menu_assertion_rejects_leftover_link_but_keeps_owner_folder(self):
+        """Start Menu cleanup checks run against disposable shortcut fixtures."""
+        source = SMOKE.read_text(encoding="utf-8")
+        start = source.index("function Assert-OwnStartMenuRemoved")
+        end = source.index("function Assert-UnderSmokeRoot", start)
+        function_source = source[start:end]
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-start-menu-") as tmp:
+                root = Path(tmp)
+                runner = root / "start-menu.ps1"
+                quoted_root = str(root).replace("'", "''")
+                runner.write_text(
+                    "$ErrorActionPreference = 'Stop'\n"
+                    + function_source
+                    + f"$fixtureRoot = '{quoted_root}'\n"
+                    + "$startDirectory = Join-Path $fixtureRoot 'Sandglass'\n"
+                    + "$startShortcut = Join-Path $startDirectory 'Sandglass.lnk'\n"
+                    + "$startDirectoryExisted = $false\n"
+                    + "New-Item -ItemType Directory -Path $startDirectory -Force | Out-Null\n"
+                    + "[IO.File]::WriteAllText($startShortcut, 'owned')\n"
+                    + "$threw = $false\n"
+                    + "try { Assert-OwnStartMenuRemoved 'leftover-link' } catch { $threw = $true }\n"
+                    + "if (-not $threw) { exit 21 }\n"
+                    + "Remove-Item -LiteralPath $startShortcut -Force\n"
+                    + "[IO.File]::WriteAllText((Join-Path $startDirectory 'owner-extra.txt'), 'keep')\n"
+                    + "Assert-OwnStartMenuRemoved 'owner-extra'\n"
+                    + "Remove-Item -LiteralPath (Join-Path $startDirectory 'owner-extra.txt') -Force\n"
+                    + "$threw = $false\n"
+                    + "try { Assert-OwnStartMenuRemoved 'empty-folder' } catch { $threw = $true }\n"
+                    + "if (-not $threw) { exit 22 }\n"
+                    + "Remove-Item -LiteralPath $startDirectory -Force\n"
+                    + "$startDirectoryExisted = $true\n"
+                    + "New-Item -ItemType Directory -Path $startDirectory -Force | Out-Null\n"
+                    + "Assert-OwnStartMenuRemoved 'pre-existing-folder'\n"
+                    + "Remove-Item -LiteralPath $fixtureRoot -Recurse -Force\n"
+                    + "exit 0\n",
+                    encoding="utf-8",
+                )
+                done = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(runner)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
+
     def test_direct_process_wait_reads_own_code_and_rejects_null(self):
         """The smoke's process helper is a real direct-process gate."""
         source = SMOKE.read_text(encoding="utf-8")

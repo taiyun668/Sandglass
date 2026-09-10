@@ -170,6 +170,20 @@ $startShortcutBackup = Join-Path $smokeRoot 'original-start-Sandglass.lnk'
 $startShortcutExisted = Test-Path -LiteralPath $startShortcut -PathType Leaf
 $startDirectoryExisted = Test-Path -LiteralPath $startDirectory -PathType Container
 
+function Assert-OwnStartMenuRemoved([string]$Phase) {
+    if (Test-Path -LiteralPath $startShortcut -PathType Leaf) {
+        throw "$Phase left the Sandglass Start Menu shortcut behind."
+    }
+    # A folder that existed before the smoke, or one that now contains owner
+    # content, may remain. Only an empty folder created by this smoke is an
+    # owned residue that should have been removed.
+    if (-not $startDirectoryExisted -and
+        (Test-Path -LiteralPath $startDirectory -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $startDirectory -Force).Count -eq 0) {
+        throw "$Phase left an empty Sandglass Start Menu folder behind."
+    }
+}
+
 function Assert-UnderSmokeRoot([string]$Path) {
     $resolved = [System.IO.Path]::GetFullPath($Path)
     $prefix = $smokeRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -519,6 +533,7 @@ try {
         "Responsive uninstall left the installed executable behind."
     if (Test-Path -LiteralPath $uninstallKey) { throw "Responsive uninstall left registration behind." }
     if (Test-Path -LiteralPath $desktopShortcut) { throw "Responsive uninstall left desktop shortcut behind." }
+    Assert-OwnStartMenuRemoved "Responsive uninstall"
     $remainingResponsiveRun = Get-OptionalRegistryValue $runKeySubKey $runValueName
     if ($null -ne $remainingResponsiveRun -and $remainingResponsiveRun.Exists) {
         throw "Responsive uninstall left the fixture Sandglass Run value behind."
@@ -610,6 +625,7 @@ try {
     if (Test-Path -LiteralPath $desktopShortcut) {
         throw "Uninstall left the Sandglass desktop shortcut behind."
     }
+    Assert-OwnStartMenuRemoved "Stopped uninstall"
     Write-Output ("PASS per-user install, post-install launch, running-copy " +
         "abort, automatic running-desktop exit and uninstall, packaged self-test, stopped uninstall, " +
         "owned-path deletion, owner/state preservation, provider byte invariance")
