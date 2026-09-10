@@ -1,6 +1,7 @@
 """Regression coverage for the installer smoke process boundary."""
 
 import ctypes
+import ctypes.wintypes
 import hashlib
 import os
 import shutil
@@ -38,6 +39,14 @@ def _kernel32():
     kernel32.CloseHandle.restype = ctypes.c_int
     kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.wintypes.FILETIME),
+        ctypes.POINTER(ctypes.wintypes.FILETIME),
+        ctypes.POINTER(ctypes.wintypes.FILETIME),
+        ctypes.POINTER(ctypes.wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
     return kernel32
 
 
@@ -69,6 +78,99 @@ def _terminate(pid: int) -> None:
             kernel32.CloseHandle(process)
 
 
+def _cpu_seconds(pid: int):
+    """User+kernel CPU time for pid, in seconds, or None if unavailable."""
+    if os.name != "nt":
+        return None
+    kernel32 = _kernel32()
+    process = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    if not process:
+        return None
+    try:
+        creation = ctypes.wintypes.FILETIME()
+        exit_time = ctypes.wintypes.FILETIME()
+        kernel_time = ctypes.wintypes.FILETIME()
+        user_time = ctypes.wintypes.FILETIME()
+        ok = kernel32.GetProcessTimes(
+            process,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        if not ok:
+            return None
+
+        def _as_100ns(filetime) -> int:
+            return (filetime.dwHighDateTime << 32) | filetime.dwLowDateTime
+
+        total_100ns = _as_100ns(kernel_time) + _as_100ns(user_time)
+        return total_100ns / 10_000_000
+    finally:
+        kernel32.CloseHandle(process)
+
+
+# Prepended to every runner script the wait tests generate. If a run times
+# out, its presence (or absence) in the collected stderr tells us whether
+# powershell.exe had even started executing the script before the timeout.
+_RUNNER_START_MARKER = "sandglass-runner-started"
+
+
+def _run_runner(
+    powershell: str, runner: Path, script: str, timeout: float = 20
+) -> subprocess.CompletedProcess:
+    """Write ``script`` to ``runner`` and run it, self-diagnosing on timeout.
+
+    On success this is equivalent to the previous direct
+    ``runner.write_text(...)`` + ``subprocess.run(..., capture_output=True,
+    text=True, timeout=timeout)`` pair. On a timeout it raises an
+    AssertionError carrying enough evidence (whether powershell.exe was still
+    running, its CPU time, whether the script had started, whether the pipes
+    closed after the kill) to diagnose the next occurrence instead of
+    discarding it.
+    """
+    runner.write_text(
+        f"[Console]::Error.WriteLine('{_RUNNER_START_MARKER}')\n" + script,
+        encoding="utf-8",
+    )
+    args = [
+        powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+        "Bypass", "-File", str(runner),
+    ]
+    # Not a context manager: when another process still holds the pipes,
+    # Popen.__exit__ closing them blocks until that holder exits, and the
+    # diagnosis below would never be raised.
+    process = subprocess.Popen(
+        args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        exit_before_kill = process.poll()
+        cpu_seconds = _cpu_seconds(process.pid)
+        process.kill()
+        pipes_closed_after_kill = True
+        out = err = None
+        try:
+            out, err = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            # Left to the daemon reader threads; closing here would block.
+            pipes_closed_after_kill = False
+        marker = "unknown" if err is None else _RUNNER_START_MARKER in err
+        if exit_before_kill is None:
+            status = "still running"
+        else:
+            status = f"had exited with {exit_before_kill}"
+        raise AssertionError(
+            f"{powershell} (pid={process.pid}) did not finish within "
+            f"{timeout}s: {status} at timeout; cpu_seconds={cpu_seconds}; "
+            f"start marker present={marker}; "
+            f"pipes closed after kill={pipes_closed_after_kill}; "
+            f"stdout={out!r} stderr={err!r}"
+        ) from exc
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
 @unittest.skipUnless(
     os.name == "nt" and _powershells(), "Windows PowerShell is required"
 )
@@ -97,7 +199,9 @@ class InstallerWaitTests(unittest.TestCase):
                 root = Path(tmp)
                 runner = root / "start-menu.ps1"
                 quoted_root = str(root).replace("'", "''")
-                runner.write_text(
+                done = _run_runner(
+                    powershell,
+                    runner,
                     "$ErrorActionPreference = 'Stop'\n"
                     + function_source
                     + f"$fixtureRoot = '{quoted_root}'\n"
@@ -122,15 +226,6 @@ class InstallerWaitTests(unittest.TestCase):
                     + "Assert-OwnStartMenuRemoved 'pre-existing-folder'\n"
                     + "Remove-Item -LiteralPath $fixtureRoot -Recurse -Force\n"
                     + "exit 0\n",
-                    encoding="utf-8",
-                )
-                done = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
-                     "Bypass", "-File", str(runner)],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
@@ -146,7 +241,9 @@ class InstallerWaitTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(prefix="sandglass-direct-wait-") as tmp:
                 runner = Path(tmp) / "wait.ps1"
                 quoted = str(powershell).replace("'", "''")
-                runner.write_text(
+                done = _run_runner(
+                    powershell,
+                    runner,
                     "$ErrorActionPreference = 'Stop'\n"
                     + function_source
                     + f"$child = Start-Process -FilePath '{quoted}' "
@@ -156,15 +253,6 @@ class InstallerWaitTests(unittest.TestCase):
                     "if ($code -ne 7) { exit 21 }\n"
                     "try { $null = Wait-DirectProcessExit $null 1 'null child'; exit 22 } "
                     "catch { exit 0 }\n",
-                    encoding="utf-8",
-                )
-                done = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
-                     "Bypass", "-File", str(runner)],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
@@ -179,7 +267,9 @@ class InstallerWaitTests(unittest.TestCase):
                 token = uuid.uuid4().hex
                 subkey = f"Software\\SandglassTests\\{token}"
                 runner = Path(tmp) / "registry-read.ps1"
-                runner.write_text(
+                done = _run_runner(
+                    powershell,
+                    runner,
                     "$ErrorActionPreference = 'Stop'\n"
                     + function_source
                     + f"$subKey = '{subkey}'\n"
@@ -203,15 +293,6 @@ class InstallerWaitTests(unittest.TestCase):
                     + "  [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($subKey)\n"
                     + "}\n"
                     + "exit 0\n",
-                    encoding="utf-8",
-                )
-                done = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
-                     "Bypass", "-File", str(runner)],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
@@ -225,7 +306,9 @@ class InstallerWaitTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(prefix="sandglass-direct-timeout-") as tmp:
                 runner = Path(tmp) / "timeout.ps1"
                 quoted = str(powershell).replace("'", "''")
-                runner.write_text(
+                done = _run_runner(
+                    powershell,
+                    runner,
                     "$ErrorActionPreference = 'Stop'\n"
                     "$script:SmokeCleanupBlocked = $false\n"
                     + function_source
@@ -237,15 +320,6 @@ class InstallerWaitTests(unittest.TestCase):
                     "if (-not $child.HasExited) { exit 22 }\n"
                     "if ($script:SmokeCleanupBlocked) { exit 23 }\n"
                     "exit 0\n",
-                    encoding="utf-8",
-                )
-                done = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
-                     "Bypass", "-File", str(runner)],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
@@ -258,7 +332,9 @@ class InstallerWaitTests(unittest.TestCase):
         for powershell in _powershells():
             with tempfile.TemporaryDirectory(prefix="sandglass-cleanup-blocked-") as tmp:
                 runner = Path(tmp) / "cleanup-blocked.ps1"
-                runner.write_text(
+                done = _run_runner(
+                    powershell,
+                    runner,
                     "$ErrorActionPreference = 'Stop'\n"
                     "$script:SmokeCleanupBlocked = $true\n"
                     + function_source
@@ -268,15 +344,6 @@ class InstallerWaitTests(unittest.TestCase):
                     + "if (-not (Test-Path -LiteralPath $smokeRoot)) { exit 22 }\n"
                     + "Remove-Item -LiteralPath $smokeRoot -Recurse -Force\n"
                     + "exit 0\n",
-                    encoding="utf-8",
-                )
-                done = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
-                     "Bypass", "-File", str(runner)],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
