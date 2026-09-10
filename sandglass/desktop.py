@@ -463,7 +463,7 @@ def apply_update_request(shell, body: str) -> dict:
     try:
         # The displayed offer may be stale or have been tampered with in the
         # request. Re-read the release, checksum manifest, and signature now.
-        offer = available_update(force=True)
+        offer = available_update(force=True, require_fresh=True)
     except Exception as exc:  # noqa: BLE001 - fail closed while panel remains up
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
     if not isinstance(offer, dict) or not offer:

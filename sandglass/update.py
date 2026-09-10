@@ -58,6 +58,7 @@ CHECKSUMS_SIGNATURE_NAME = "SHA256SUMS.windows.sig"
 RELEASE_PUBLIC_KEY = "21D35013DCA960BAE23B6A0C7CF08A79C888A45C0375F67A01D4FABA8E1A4B1E853FAA6A9C09D380272A2980AF44914CE109E07446A734BD7F3BC2A14D2D7EBA"
 
 _LOCK = threading.RLock()
+_FIRST_AVAILABLE_UPDATE_DONE = False
 _UPDATE_GATE_NAME = "update-apply.lock"
 _UPDATE_GATE: tuple[Path, Any] | None = None
 
@@ -270,14 +271,11 @@ def offer_from(release: dict[str, Any]) -> dict[str, Any]:
         # there is nothing to offer. An update that cannot be checked is not an
         # update, it is a download.
         return {}
-    try:
-        raw_sums = _get(assets[CHECKSUMS_NAME], MAX_FEED_BYTES)
-        sums = raw_sums.decode("utf-8", "replace")
-        digest = checksum_for(sums, installer)
-        url = _https(assets[installer])
-        manifest_signed = _manifest_signature_ok(raw_sums, assets, version, installer)
-    except (urllib.error.URLError, OSError, ValueError):
-        return {}
+    raw_sums = _get(assets[CHECKSUMS_NAME], MAX_FEED_BYTES)
+    sums = raw_sums.decode("utf-8", "replace")
+    digest = checksum_for(sums, installer)
+    url = _https(assets[installer])
+    manifest_signed = _manifest_signature_ok(raw_sums, assets, version, installer)
     if not digest:
         return {}
     if not manifest_signed:
@@ -320,10 +318,7 @@ def _manifest_signature_ok(
         return False
     if not checksum_for(raw_sums.decode("ascii", "ignore"), installer):
         return False
-    try:
-        signature = _get(assets[CHECKSUMS_SIGNATURE_NAME], MAX_FEED_BYTES)
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
+    signature = _get(assets[CHECKSUMS_SIGNATURE_NAME], MAX_FEED_BYTES)
     return verify_release_signature(raw_sums, bytes.fromhex(
         signature.decode("ascii", "ignore").strip()
     ) if _is_hex(signature) else signature, RELEASE_PUBLIC_KEY)
@@ -387,24 +382,51 @@ def _seconds_since_check(stored: dict[str, Any]) -> float | None:
     return elapsed if elapsed >= 0 else None
 
 
-def available_update(force: bool = False) -> dict[str, Any]:
-    """The offer to show, or {} for nothing. Cached, and never downloads."""
+def _displayable_cached_offer(stored: dict[str, Any]) -> dict[str, Any]:
+    cached = stored.get("offer")
+    if not isinstance(cached, dict):
+        return {}
+    version = cached.get("version")
+    if isinstance(version, str) and is_newer(version, __version__):
+        return dict(cached)
+    return {}
+
+
+def available_update(
+    force: bool = False, *, require_fresh: bool = False
+) -> dict[str, Any]:
+    """Return a display offer without downloading; force refreshes display data.
+
+    ``require_fresh`` is the installation boundary: it also forces a network
+    check and never falls back to a cached offer after a failed check.
+    """
+    global _FIRST_AVAILABLE_UPDATE_DONE
+    first_check = False
     try:
         with _LOCK, _state_transaction():
+            first_check = not _FIRST_AVAILABLE_UPDATE_DONE
             stored = _read_state()
+            _FIRST_AVAILABLE_UPDATE_DONE = True
             elapsed = _seconds_since_check(stored)
-            if not force and elapsed is not None and elapsed < CHECK_TTL_SECONDS:
+            if (
+                not force
+                and not require_fresh
+                and not first_check
+                and not stored.get("error")
+                and elapsed is not None
+                and elapsed < CHECK_TTL_SECONDS
+            ):
                 cached = stored.get("offer")
+                if not isinstance(cached, dict):
+                    return {}
                 # Freshness is not enough. A 0.1.1 process writes a 0.1.3
                 # offer; after that install, this 0.1.3 process still sees a
                 # cache inside the TTL whose offer.version is itself. Serving
                 # it again is the stale update badge. Compare against this
                 # module's __version__ on every cached return.
-                if not isinstance(cached, dict):
-                    return {}
-                version = cached.get("version")
-                if isinstance(version, str) and is_newer(version, __version__):
-                    return dict(cached)
+                displayable = _displayable_cached_offer(stored)
+                if displayable:
+                    return displayable
                 if cached:
                     next_state = dict(stored)
                     next_state["offer"] = {}
@@ -412,7 +434,7 @@ def available_update(force: bool = False) -> dict[str, Any]:
                 return {}
     except (OSError, ValueError, UpdateStateLockError) as exc:
         record_component_failure("update_state_write", exc)
-        if force:
+        if force or require_fresh:
             raise UpdateStateLockError(
                 "the update state could not be read or locked"
             ) from exc
@@ -435,20 +457,31 @@ def available_update(force: bool = False) -> dict[str, Any]:
             # fields. In particular, preserve an announcement written by an
             # update handoff while the request was running.
             latest = _read_state()
-            latest.update({
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-                "current_version": __version__,
-                "offer": offer,
-                "error": error,
-            })
+            if error:
+                # A failed request is not a completed observation. Keep the
+                # last successful timestamp, version, and offer so a temporary
+                # outage cannot erase the badge or create a false freshness
+                # window. The next natural call must see this error and retry.
+                latest["error"] = error
+            else:
+                latest.update({
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "current_version": __version__,
+                    "offer": offer,
+                    "error": "",
+                })
             _write_state(latest)
     except (OSError, ValueError, UpdateStateLockError) as exc:
         record_component_failure("update_state_write", exc)
-        if force:
+        if force or require_fresh:
             raise UpdateStateLockError(
                 "the update state could not be committed"
             ) from exc
-        return offer
+        return {} if require_fresh else offer
+    if error:
+        if require_fresh:
+            return {}
+        return _displayable_cached_offer(latest)
     return offer
 
 

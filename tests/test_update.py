@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -57,6 +58,46 @@ class OfferTests(unittest.TestCase):
     def test_a_release_without_a_checksum_is_not_offered(self):
         """An update that cannot be checked is not an update, it is a download."""
         self.assertEqual(update.offer_from(self._release(checksums=False)), {})
+
+    def _signed_release(self):
+        release = self._release()
+        release["assets"].append({
+            "name": update.CHECKSUMS_SIGNATURE_NAME,
+            "browser_download_url": "https://github.com/a/b/releases/x/sums.sig",
+        })
+        return release
+
+    def test_manifest_fetch_failures_propagate_to_the_check(self):
+        for error_type, error in (
+            (urllib.error.URLError, urllib.error.URLError("offline")),
+            (OSError, OSError("offline")),
+            (ValueError, ValueError("bad manifest")),
+        ):
+            with self.subTest(error=error_type.__name__), patch.object(
+                update, "RELEASE_PUBLIC_KEY", "11" * 64
+            ), patch.object(update, "_get", side_effect=error):
+                with self.assertRaises(error_type):
+                    update.offer_from(self._signed_release())
+
+    def test_signature_fetch_failures_propagate_to_the_check(self):
+        digest = "a" * 64
+        sums = (
+            b"# Sandglass-Version: 9.9.9\n"
+            + digest.encode()
+            + b"  "
+            + self.ASSET.encode()
+            + b"\n"
+        )
+        for error_type, error in (
+            (urllib.error.URLError, urllib.error.URLError("offline")),
+            (OSError, OSError("offline")),
+            (ValueError, ValueError("bad signature")),
+        ):
+            with self.subTest(error=error_type.__name__), patch.object(
+                update, "RELEASE_PUBLIC_KEY", "11" * 64
+            ), patch.object(update, "_get", side_effect=[sums, error]):
+                with self.assertRaises(error_type):
+                    update.offer_from(self._signed_release())
 
     def test_an_older_release_is_not_offered(self):
         self.assertEqual(update.offer_from(self._release(tag="v0.0.1")), {})
@@ -237,19 +278,25 @@ class CheckStateTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.home = Path(tmp.name)
 
+    def _as_started(self):
+        # Existing cache tests model a process that has already made its first
+        # check. ``create=True`` keeps these regression tests runnable against
+        # the old production module before the in-memory flag exists.
+        return patch.object(update, "_FIRST_AVAILABLE_UPDATE_DONE", True, create=True)
+
     def test_no_release_means_no_offer_and_no_crash(self):
         with patch.object(update, "_get", side_effect=OSError("404")):
             self.assertEqual(update.available_update(force=True), {})
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
-        self.assertEqual(stored["offer"], {})
-        self.assertTrue(stored["error"])
+        self.assertNotIn("offer", stored)
+        self.assertEqual(stored, {"error": "OSError"})
 
     def test_a_check_is_cached_rather_than_repeated(self):
         calls = []
 
         def once(*args, **kwargs):
             calls.append(1)
-            raise OSError("404")
+            return b'{"tag_name":"v0.0.1","assets":[]}'
 
         with patch.object(update, "_get", once):
             update.available_update(force=True)
@@ -299,12 +346,94 @@ class CheckStateTests(unittest.TestCase):
                     calls.append(1)
                     raise OSError("404")
 
-                with patch.object(update, "_get", counted):
+                with self._as_started(), patch.object(update, "_get", counted):
                     offer = update.available_update()
 
                 self.assertEqual(len(calls), expected_calls)
                 if not expected_calls:
                     self.assertEqual(offer.get("version"), "9.9.9")
+
+    def test_a_fresh_process_checks_once_before_using_a_fresh_disk_cache(self):
+        self._fresh_offer_state(
+            {"version": "9.9.9", "asset": "cached.exe"},
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+        child_code = (
+            "import json,sys\n"
+            "from sandglass import update\n"
+            "calls=[]\n"
+            "def stub(*_args,**_kwargs):\n"
+            "    calls.append(1)\n"
+            "    return b'{\"tag_name\":\"v0.0.1\",\"assets\":[]}'\n"
+            "update._get=stub\n"
+            "first=update.available_update()\n"
+            "after_first_call=len(calls)\n"
+            "second=update.available_update()\n"
+            "after_second_call=len(calls)\n"
+            "print(json.dumps({'after_first_call':after_first_call,'after_second_call':after_second_call,'first':first,'second':second}))\n"
+        )
+        child_env = os.environ.copy()
+        child_env["SANDGLASS_HOME"] = str(self.home)
+        child = subprocess.run(
+            [sys.executable, "-c", child_code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        result = json.loads(child.stdout)
+        self.assertEqual(
+            [result["after_first_call"], result["after_second_call"]], [1, 1]
+        )
+        self.assertEqual(result["first"], {})
+        self.assertEqual(result["second"], {})
+
+    def test_a_state_read_failure_does_not_consume_startup_bypass(self):
+        self._fresh_offer_state(
+            {"version": "9.9.9", "asset": "cached.exe"},
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        )
+        child_code = (
+            "import json\n"
+            "from sandglass import update\n"
+            "real_read=update._read_state\n"
+            "read_attempts=[]\n"
+            "def read_once():\n"
+            "    read_attempts.append(1)\n"
+            "    if len(read_attempts)==1:\n"
+            "        raise OSError('transient state read')\n"
+            "    return real_read()\n"
+            "update._read_state=read_once\n"
+            "calls=[]\n"
+            "def stub(*_args,**_kwargs):\n"
+            "    calls.append(1)\n"
+            "    return b'{\"tag_name\":\"v0.0.1\",\"assets\":[]}'\n"
+            "update._get=stub\n"
+            "first=update.available_update()\n"
+            "after_first_call=len(calls)\n"
+            "second=update.available_update()\n"
+            "after_second_call=len(calls)\n"
+            "print(json.dumps({'after_first_call':after_first_call,'after_second_call':after_second_call,'first':first,'second':second}))\n"
+        )
+        child_env = os.environ.copy()
+        child_env["SANDGLASS_HOME"] = str(self.home)
+        child = subprocess.run(
+            [sys.executable, "-c", child_code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        result = json.loads(child.stdout)
+        self.assertEqual(
+            [result["after_first_call"], result["after_second_call"]], [0, 1]
+        )
+        self.assertEqual(result["first"], {})
+        self.assertEqual(result["second"], {})
 
     def _fresh_offer_state(self, offer, **extra):
         """A still-fresh cache, as left on disk by an older process."""
@@ -320,6 +449,202 @@ class CheckStateTests(unittest.TestCase):
         )
         return state
 
+    def test_failed_feed_manifest_and_signature_checks_preserve_cached_offer(self):
+        cached = {
+            "version": "9.9.9",
+            "asset": "cached.exe",
+            "url": "https://github.com/a/b/cached.exe",
+            "sha256": "a" * 64,
+            "manifest_signed": True,
+        }
+        asset = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
+        sums_url = "https://github.com/a/b/releases/x/sums"
+        signature_url = "https://github.com/a/b/releases/x/sums.sig"
+        release = {
+            "tag_name": "v9.9.9",
+            "assets": [
+                {"name": asset, "browser_download_url": "https://github.com/a/b/releases/x/setup.exe"},
+                {"name": update.CHECKSUMS_NAME, "browser_download_url": sums_url},
+                {"name": update.CHECKSUMS_SIGNATURE_NAME, "browser_download_url": signature_url},
+            ],
+        }
+        sums = (
+            b"# Sandglass-Version: 9.9.9\n"
+            + b"a" * 64
+            + b"  "
+            + asset.encode()
+            + b"\n"
+        )
+        cases = (
+            ("feed", urllib.error.URLError, 2),
+            ("feed", OSError, 2),
+            ("feed", ValueError, 2),
+            ("manifest", urllib.error.URLError, 4),
+            ("manifest", OSError, 4),
+            ("manifest", ValueError, 4),
+            ("signature", urllib.error.URLError, 6),
+            ("signature", OSError, 6),
+            ("signature", ValueError, 6),
+        )
+        for phase, error_type, expected_calls in cases:
+            with self.subTest(phase=phase, error=error_type.__name__):
+                original = self._fresh_offer_state(
+                    cached,
+                    pending_announcement={"version": "8.8.8", "notes": "keep"},
+                    unrelated={"keep": True},
+                )
+                calls = []
+
+                def failing_get(url, *_args, **_kwargs):
+                    calls.append(url)
+                    if phase == "feed":
+                        raise error_type("offline")
+                    if url == update.FEED_URL:
+                        return json.dumps(release).encode()
+                    if phase == "manifest":
+                        raise error_type("offline")
+                    if url == sums_url:
+                        return sums
+                    if phase == "signature":
+                        raise error_type("offline")
+                    raise AssertionError(f"unexpected request: {url}")
+
+                with patch.object(update, "_get", side_effect=failing_get):
+                    if phase == "signature":
+                        with patch.object(update, "RELEASE_PUBLIC_KEY", "11" * 64):
+                            shown_after_force = update.available_update(force=True)
+                            shown_after_retry = update.available_update()
+                    else:
+                        shown_after_force = update.available_update(force=True)
+                        shown_after_retry = update.available_update()
+
+                stored = json.loads(
+                    (self.home / "update-check.json").read_text(encoding="utf-8")
+                )
+                expected = dict(original)
+                expected["error"] = error_type.__name__
+                with self.subTest(assertion="request_count"):
+                    self.assertEqual(
+                        len(calls), expected_calls,
+                        "each failed check must issue a real feed request before retrying",
+                    )
+                with self.subTest(assertion="force_returned_offer"):
+                    self.assertEqual(
+                        shown_after_force,
+                        cached,
+                        "a failed force/display check must retain the still-newer badge",
+                    )
+                with self.subTest(assertion="retry_returned_offer"):
+                    self.assertEqual(
+                        shown_after_retry,
+                        cached,
+                        "the natural retry must retain the still-newer badge",
+                    )
+                with self.subTest(assertion="persisted_state"):
+                    self.assertEqual(
+                        stored,
+                        expected,
+                        "a failed check may record only its error; cached offer and timestamps must stay intact",
+                    )
+
+    def test_a_completed_check_with_an_invalid_signature_clears_cached_offer(self):
+        cached = {
+            "version": "9.9.9",
+            "asset": "cached.exe",
+            "url": "https://github.com/a/b/cached.exe",
+            "sha256": "a" * 64,
+            "manifest_signed": True,
+        }
+        original = self._fresh_offer_state(
+            cached,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+            current_version="0.1.1",
+            error="OSError",
+            pending_announcement={"version": "8.8.8"},
+            unrelated={"keep": True},
+        )
+        asset = "Sandglass-9.9.9-windows-x64-unsigned-setup.exe"
+        sums_url = "https://github.com/a/b/releases/x/sums"
+        signature_url = "https://github.com/a/b/releases/x/sums.sig"
+        release = {
+            "tag_name": "v9.9.9",
+            "assets": [
+                {"name": asset, "browser_download_url": "https://github.com/a/b/releases/x/setup.exe"},
+                {"name": update.CHECKSUMS_NAME, "browser_download_url": sums_url},
+                {"name": update.CHECKSUMS_SIGNATURE_NAME, "browser_download_url": signature_url},
+            ],
+        }
+        sums = (
+            b"# Sandglass-Version: 9.9.9\n"
+            + b"a" * 64
+            + b"  "
+            + asset.encode()
+            + b"\n"
+        )
+        calls = []
+
+        def stub(url, *_args, **_kwargs):
+            calls.append(url)
+            if url == update.FEED_URL:
+                return json.dumps(release).encode()
+            if url == sums_url:
+                return sums
+            if url == signature_url:
+                return b"\x00" * 64
+            raise AssertionError(f"unexpected request: {url}")
+
+        with patch.object(update, "RELEASE_PUBLIC_KEY", "11" * 64), patch.object(
+            update, "_get", side_effect=stub
+        ), patch(
+            "sandglass.release_signature.verify_release_signature",
+            return_value=False,
+        ):
+            result = update.available_update(force=True)
+
+        stored = json.loads(
+            (self.home / "update-check.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(calls, [update.FEED_URL, sums_url, signature_url])
+        self.assertEqual(result, {})
+        self.assertEqual(stored["offer"], {})
+        self.assertEqual(stored["error"], "")
+        self.assertEqual(stored["current_version"], update.__version__)
+        self.assertNotEqual(stored["checked_at"], original["checked_at"])
+        self.assertEqual(stored["pending_announcement"], original["pending_announcement"])
+        self.assertEqual(stored["unrelated"], original["unrelated"])
+
+    def test_required_fresh_failure_keeps_disk_offer_but_returns_nothing(self):
+        cached = {"version": "9.9.9", "asset": "cached.exe"}
+        original = self._fresh_offer_state(
+            cached,
+            pending_announcement={"version": "8.8.8"},
+        )
+        with patch.object(update, "_get", side_effect=OSError("offline")):
+            self.assertEqual(
+                update.available_update(force=True, require_fresh=True), {}
+            )
+        stored = json.loads(
+            (self.home / "update-check.json").read_text(encoding="utf-8")
+        )
+        expected = dict(original)
+        expected["error"] = "OSError"
+        self.assertEqual(stored, expected)
+
+    def test_require_fresh_bypasses_cache_even_without_force(self):
+        self._fresh_offer_state(
+            {"version": "9.9.9", "asset": "cached.exe"},
+        )
+        calls = []
+
+        def once(*_args, **_kwargs):
+            calls.append(1)
+            return b'{"tag_name":"v0.0.1","assets":[]}'
+
+        with self._as_started(), patch.object(update, "_get", once):
+            result = update.available_update(force=False, require_fresh=True)
+        self.assertEqual(calls, [1])
+        self.assertEqual(result, {})
+
     def test_cached_offer_matching_this_process_is_cleared_not_shown(self):
         """0.1.1 cached a 0.1.3 offer; 0.1.3 must not badge it as available."""
         pending = {"version": "0.1.3", "notes": "已安装"}
@@ -329,7 +654,7 @@ class CheckStateTests(unittest.TestCase):
             unrelated={"keep": True},
         )
         calls = []
-        with patch.object(update, "__version__", "0.1.3"), patch.object(
+        with self._as_started(), patch.object(update, "__version__", "0.1.3"), patch.object(
             update, "_get", lambda *a, **k: calls.append(1)
         ):
             offer = update.available_update()
@@ -358,7 +683,7 @@ class CheckStateTests(unittest.TestCase):
                     unrelated={"keep": name},
                 )
                 calls = []
-                with patch.object(update, "__version__", "0.1.3"), patch.object(
+                with self._as_started(), patch.object(update, "__version__", "0.1.3"), patch.object(
                     update, "_get", lambda *a, **k: calls.append(1)
                 ):
                     offer = update.available_update()
@@ -380,7 +705,7 @@ class CheckStateTests(unittest.TestCase):
             unrelated={"keep": True},
         )
         calls = []
-        with patch.object(update, "__version__", "0.1.3"), patch.object(
+        with self._as_started(), patch.object(update, "__version__", "0.1.3"), patch.object(
             update, "_get", lambda *a, **k: calls.append(1)
         ):
             offer = update.available_update()
@@ -390,12 +715,13 @@ class CheckStateTests(unittest.TestCase):
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
         self.assertEqual(stored, original)
 
-    def test_the_unusable_monotonic_stamp_is_no_longer_written(self):
+    def test_a_failed_check_does_not_write_a_freshness_stamp(self):
         with patch.object(update, "_get", side_effect=OSError("404")):
             update.available_update(force=True)
         stored = json.loads((self.home / "update-check.json").read_text(encoding="utf-8"))
-        self.assertIn("checked_at", stored)
+        self.assertNotIn("checked_at", stored)
         self.assertNotIn("checked_at_monotonic", stored)
+        self.assertEqual(stored["error"], "OSError")
 
     def test_a_state_file_we_cannot_read_is_not_replaced_with_an_empty_offer(self):
         """A failed read is not an empty check.

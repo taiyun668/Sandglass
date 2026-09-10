@@ -268,10 +268,26 @@ class UpdateApplyRequestTests(unittest.TestCase):
                 patch("sandglass.update.apply_update") as apply:
             result = apply_update_request(shell, json.dumps(forged))
 
-        check.assert_called_once_with(force=True)
+        check.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_not_called()
         shell.quit.assert_not_called()
         self.assertFalse(result["ok"])
+
+    def test_failed_required_fresh_check_cannot_launch_cached_offer(self):
+        shell = Mock()
+        cached = {"version": "9.9.9", "asset": "cached.exe"}
+
+        def check(*, force=False, require_fresh=False):
+            return {} if require_fresh else cached
+
+        with patch("sandglass.update.available_update", side_effect=check) as check_mock, \
+                patch("sandglass.update.apply_update") as apply:
+            result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
+
+        check_mock.assert_called_once_with(force=True, require_fresh=True)
+        apply.assert_not_called()
+        shell.quit.assert_not_called()
+        self.assertEqual(result, {"ok": False, "error": "no_update"})
 
     def test_revalidation_version_mismatch_does_not_apply_or_quit(self):
         shell = Mock()
@@ -280,7 +296,7 @@ class UpdateApplyRequestTests(unittest.TestCase):
                 patch("sandglass.update.apply_update") as apply:
             result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
 
-        check.assert_called_once_with(force=True)
+        check.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_not_called()
         shell.quit.assert_not_called()
         self.assertEqual(result, {"ok": False, "error": "stale_update"})
@@ -310,7 +326,7 @@ class UpdateApplyRequestTests(unittest.TestCase):
                       return_value={"ok": True, "version": "9.9.9"}) as apply:
             result = apply_update_request(shell, json.dumps(body))
 
-        check.assert_called_once_with(force=True)
+        check.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_called_once_with(authoritative)
         shell.quit.assert_called_once_with()
         self.assertEqual(result["version"], "9.9.9")
