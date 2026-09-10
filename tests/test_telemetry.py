@@ -1571,6 +1571,13 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(store.records(), [])
 
     def test_dashboard_accepts_gzipped_otlp_protobuf_on_localhost(self):
+        # This test asserts protocol behavior, not a three-second latency SLO.
+        # A loaded Windows runner once completed ingestion after the client's
+        # 3 s deadline: the handler then hit WinError 10053 while writing the
+        # successful response, and TemporaryDirectory blamed the still-live
+        # request thread for its open SQLite file. Keep one bounded harness
+        # deadline, but do not make scheduler delay a product failure.
+        harness_timeout = 30
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"SANDGLASS_HOME": tmp}, clear=False
         ):
@@ -1599,12 +1606,13 @@ class TelemetryTests(unittest.TestCase):
                     },
                     method="POST",
                 )
-                with urllib.request.urlopen(request, timeout=3) as response:
+                with urllib.request.urlopen(request, timeout=harness_timeout) as response:
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.headers.get_content_type(), "application/x-protobuf")
                 self.assertEqual(len(TelemetryStore().records()), 1)
                 with urllib.request.urlopen(
-                    f"http://127.0.0.1:{httpd.server_port}/api/telemetry-status", timeout=3
+                    f"http://127.0.0.1:{httpd.server_port}/api/telemetry-status",
+                    timeout=harness_timeout,
                 ) as response:
                     status = json.load(response)
                 grok = next(row for row in status["providers"] if row["provider"] == "grok")
@@ -1615,7 +1623,8 @@ class TelemetryTests(unittest.TestCase):
             finally:
                 httpd.shutdown()
                 httpd.server_close()
-                thread.join(timeout=3)
+                thread.join(timeout=harness_timeout)
+                self.assertFalse(thread.is_alive(), "dashboard server did not stop")
 
     def test_otlp_only_handler_accepts_logs_but_rejects_dashboard_gets(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
