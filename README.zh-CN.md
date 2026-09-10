@@ -11,12 +11,12 @@
 
 ## 下载 Windows 10/11 x64 版
 
-### [下载安装包——推荐](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/Sandglass-0.1.6-windows-x64-unsigned-setup.exe)
+### [下载安装包——推荐](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/Sandglass-0.1.7-windows-x64-unsigned-setup.exe)
 
 适合大多数用户。它会为当前 Windows 用户安装 Sandglass，创建桌面和开始菜单快捷方式，
 安装完成后启动应用，并支持以后的应用内升级。**只有你在 Sandglass 中主动启用时，软件才会开机启动。**
 
-### [下载便携 ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/Sandglass-0.1.6-windows-x64-unsigned-portable.zip)
+### [下载便携 ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/Sandglass-0.1.7-windows-x64-unsigned-portable.zip)
 
 不想安装时选择这个版本。请先解压完整 ZIP，进入 `Sandglass` 文件夹，再运行
 `Sandglass.exe`；不要直接在压缩包里运行。便携版以后通过应用内升级时，会按设计转入安装版通道。
@@ -25,8 +25,8 @@ Sandglass 目前是未签名的社区版本，因此 Windows 首次安装时可�
 如果 Smart App Control 直接阻止安装，请改用便携 ZIP，不要关闭 Windows 安全功能。
 
 [更新说明和全部文件](https://github.com/taiyun668/Sandglass/releases/latest)
-· [SHA-256 校验清单](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/SHA256SUMS.windows)
-· [Owner 签名](https://github.com/taiyun668/Sandglass/releases/download/v0.1.6/SHA256SUMS.windows.sig)
+· [SHA-256 校验清单](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/SHA256SUMS.windows)
+· [Owner 签名](https://github.com/taiyun668/Sandglass/releases/download/v0.1.7/SHA256SUMS.windows.sig)
 
 <p align="center">
   <img src="docs/assets/sandglass-overview.png" alt="使用隐私安全合成演示数据的 Sandglass 总览" width="360">
