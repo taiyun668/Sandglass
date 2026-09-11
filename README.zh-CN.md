@@ -22,6 +22,9 @@
 点 **Delete** 右边的箭头，选 **Keep anyway**（中文版 Edge 的按钮文字可能不同）。这只是
 该次 Edge 英文界面/测试机器的实际观察，不承诺其他浏览器或电脑表现。
 
+<p><img src="docs/assets/edge-download-warning.png" alt="Microsoft Edge 下载列表中的 Sandglass 警告" width="360"></p>
+<p><img src="docs/assets/edge-keep-anyway.png" alt="Microsoft Edge 警告菜单中的 Delete 和 Keep anyway" width="360"></p>
+
 ### [下载便携 ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/Sandglass-0.1.10-windows-x64-unsigned-portable.zip)
 
 不想安装时选择这个版本。请先解压完整 ZIP，进入 `Sandglass` 文件夹，再运行

@@ -29,6 +29,9 @@ Clicking the arrow beside **Delete** exposed **Keep anyway**. This is an
 observation from that Edge/English-interface test machine only; other browsers
 or computers may behave differently.
 
+<p><img src="docs/assets/edge-download-warning.png" alt="Microsoft Edge Downloads list showing the Sandglass download warning" width="360"></p>
+<p><img src="docs/assets/edge-keep-anyway.png" alt="Microsoft Edge warning menu showing Delete and Keep anyway" width="360"></p>
+
 ### [Download the portable ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/Sandglass-0.1.10-windows-x64-unsigned-portable.zip)
 
 Choose this if you do not want to install. Extract the entire ZIP, open the
