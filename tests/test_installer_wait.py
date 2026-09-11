@@ -3,7 +3,9 @@
 import ctypes
 import ctypes.wintypes
 import hashlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -47,7 +49,80 @@ def _kernel32():
         ctypes.POINTER(ctypes.wintypes.FILETIME),
     ]
     kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
     return kernel32
+
+
+class _ObservedProcess:
+    """Keep one native process identity stable while a timing probe runs."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.kernel32 = _kernel32()
+        self.handle = self.kernel32.OpenProcess(
+            0x100000 | 0x1000, False, pid  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        )
+        self.open_error = None if self.handle else ctypes.get_last_error()
+
+    def snapshot(self) -> dict[str, object]:
+        if not self.handle:
+            return {
+                "pid": self.pid,
+                "state": "unknown",
+                "open_error": self.open_error,
+            }
+        wait_result = self.kernel32.WaitForSingleObject(self.handle, 0)
+        wait_error = (
+            ctypes.get_last_error() if wait_result == 0xFFFFFFFF else None
+        )
+        exit_code = ctypes.c_ulong()
+        exit_ok = self.kernel32.GetExitCodeProcess(
+            self.handle, ctypes.byref(exit_code)
+        )
+        exit_error = None if exit_ok else ctypes.get_last_error()
+        creation = ctypes.wintypes.FILETIME()
+        exit_time = ctypes.wintypes.FILETIME()
+        kernel_time = ctypes.wintypes.FILETIME()
+        user_time = ctypes.wintypes.FILETIME()
+        times_ok = self.kernel32.GetProcessTimes(
+            self.handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        )
+        times_error = None if times_ok else ctypes.get_last_error()
+
+        def as_100ns(value) -> int:
+            return (value.dwHighDateTime << 32) | value.dwLowDateTime
+
+        if wait_result == 0x00000102:  # WAIT_TIMEOUT
+            state = "running"
+        elif wait_result == 0x00000000:  # WAIT_OBJECT_0
+            state = "exited"
+        else:
+            state = "unknown"
+        return {
+            "pid": self.pid,
+            "state": state,
+            "wait_result": wait_result,
+            "wait_error": wait_error,
+            "exit_code": exit_code.value if exit_ok else None,
+            "exit_error": exit_error,
+            "creation_100ns": as_100ns(creation) if times_ok else None,
+            "exit_100ns": as_100ns(exit_time) if times_ok else None,
+            "cpu_seconds": (
+                (as_100ns(kernel_time) + as_100ns(user_time)) / 10_000_000
+                if times_ok else None
+            ),
+            "times_error": times_error,
+        }
+
+    def close(self) -> None:
+        if self.handle:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
 
 
 def _alive(pid: int) -> bool:
@@ -129,7 +204,16 @@ def _run_runner(
     closed after the kill) to diagnose the next occurrence instead of
     discarding it.
     """
+    start_sidecar = runner.with_name(runner.name + ".started.json")
+    quoted_sidecar = str(start_sidecar).replace("'", "''")
     runner.write_text(
+        "[IO.File]::WriteAllText("
+        f"'{quoted_sidecar}', "
+        "(([ordered]@{at=[DateTime]::UtcNow.ToString('o');pid=$PID;"
+        "ps_edition=[string]$PSVersionTable.PSEdition;"
+        "ps_version=[string]$PSVersionTable.PSVersion;"
+        "ps_home=[string]$PSHOME} | ConvertTo-Json -Compress)), "
+        "[Text.Encoding]::UTF8)\n"
         f"[Console]::Error.WriteLine('{_RUNNER_START_MARKER}')\n" + script,
         encoding="utf-8",
     )
@@ -157,6 +241,25 @@ def _run_runner(
             # Left to the daemon reader threads; closing here would block.
             pipes_closed_after_kill = False
         marker = "unknown" if err is None else _RUNNER_START_MARKER in err
+        try:
+            start_observation = json.loads(
+                start_sidecar.read_text(encoding="utf-8-sig")
+            )
+        except FileNotFoundError:
+            start_observation = "not_observed"
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as sidecar_error:
+            start_observation = f"unreadable:{type(sidecar_error).__name__}"
+        try:
+            powershell_hash = hashlib.sha256(Path(powershell).read_bytes()).hexdigest()
+        except OSError as hash_error:
+            powershell_hash = f"unavailable:{type(hash_error).__name__}"
+        runtime_identity = {
+            "powershell": powershell,
+            "powershell_sha256": powershell_hash,
+            "python": sys.version.split()[0],
+            "windows": platform.version(),
+            "runner_image": os.environ.get("ImageVersion", ""),
+        }
         if exit_before_kill is None:
             status = "still running"
         else:
@@ -165,22 +268,36 @@ def _run_runner(
             f"{powershell} (pid={process.pid}) did not finish within "
             f"{timeout}s: {status} at timeout; cpu_seconds={cpu_seconds}; "
             f"start marker present={marker}; "
+            f"start sidecar={start_observation!r}; runtime={runtime_identity!r}; "
             f"pipes closed after kill={pipes_closed_after_kill}; "
             f"stdout={out!r} stderr={err!r}"
         ) from exc
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
-def _assert_communicate_times_out(process, timeout: float) -> None:
+def _assert_communicate_times_out(
+    process, timeout: float, *, descendant: _ObservedProcess | None = None,
+    context: dict[str, object] | None = None,
+) -> None:
     started = time.monotonic()
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        outer_returncode = process.poll()
+        descendant_state = descendant.snapshot() if descendant else None
+        if outer_returncode is not None:
+            raise AssertionError(
+                f"pipes remained open after outer exited: "
+                f"outer_returncode={outer_returncode}; "
+                f"descendant={descendant_state!r}; context={context!r}"
+            )
         return
     elapsed = time.monotonic() - started
+    descendant_state = descendant.snapshot() if descendant else None
     raise AssertionError(
         f"process returned before {timeout}s: returncode={process.returncode}; "
-        f"stdout={stdout!r} stderr={stderr!r} elapsed={elapsed:.3f}s"
+        f"stdout={stdout!r} stderr={stderr!r} elapsed={elapsed:.3f}s; "
+        f"descendant={descendant_state!r}; context={context!r}"
     )
 
 
@@ -336,6 +453,34 @@ class InstallerWaitTests(unittest.TestCase):
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
 
+    def test_native_observer_distinguishes_one_process_before_and_after_exit(self):
+        """The diagnostic follows one handle, rather than reopening a reused PID."""
+        for powershell in _powershells():
+            child = subprocess.Popen(
+                [
+                    powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
+                    "Bypass", "-Command", "Start-Sleep -Seconds 60",
+                ],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            observed = _ObservedProcess(child.pid)
+            try:
+                running = observed.snapshot()
+                self.assertEqual(running["state"], "running", running)
+                child.kill()
+                child.wait(timeout=5)
+                exited = observed.snapshot()
+                self.assertEqual(exited["state"], "exited", exited)
+                self.assertEqual(exited["creation_100ns"], running["creation_100ns"])
+                self.assertNotEqual(exited["exit_code"], 259)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+                observed.close()
+
     def test_cleanup_is_suppressed_when_exact_process_reap_is_unknown(self):
         """The smoke leaves its fixture for review when cleanup safety is unknown."""
         source = SMOKE.read_text(encoding="utf-8")
@@ -359,6 +504,48 @@ class InstallerWaitTests(unittest.TestCase):
                     + "exit 0\n",
                 )
                 self.assertEqual(done.returncode, 0, done.stderr or done.stdout)
+
+    def test_timeout_diagnostic_has_an_independent_script_start_sidecar(self):
+        """A pipe marker alone cannot prove whether the script began executing."""
+        for powershell in _powershells():
+            with tempfile.TemporaryDirectory(prefix="sandglass-start-sidecar-") as tmp:
+                runner = Path(tmp) / "sidecar.ps1"
+                with self.assertRaises(AssertionError) as raised:
+                    _run_runner(
+                        powershell,
+                        runner,
+                        "Start-Sleep -Seconds 60\n",
+                        timeout=1,
+                    )
+                message = str(raised.exception)
+                self.assertIn("start sidecar={'at':", message)
+                self.assertIn("'pid':", message)
+                self.assertIn("'ps_edition':", message)
+                self.assertIn("'ps_version':", message)
+                self.assertIn("'ps_home':", message)
+                self.assertIn("runtime={'powershell':", message)
+
+    def test_pipe_timeout_is_not_success_after_outer_process_exited(self):
+        """Inherited pipe EOF cannot stand in for a live process-tree wait."""
+
+        class ExitedOuterWithOpenPipes:
+            returncode = 0
+
+            @staticmethod
+            def communicate(timeout):
+                raise subprocess.TimeoutExpired(["fixture"], timeout)
+
+            @staticmethod
+            def poll():
+                return 0
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "pipes remained open after outer exited: outer_returncode=0",
+        ):
+            _assert_communicate_times_out(
+                ExitedOuterWithOpenPipes(), timeout=3,
+            )
 
     def test_the_packaged_self_test_gate_reads_the_process_exit_code(self):
         """A GUI-subsystem child is not waited for by a direct call.
@@ -640,16 +827,24 @@ class InstallerWaitTests(unittest.TestCase):
         wait_function = source[wait_start:wait_end]
 
         with tempfile.TemporaryDirectory(prefix="sandglass-installer-wait-") as tmp:
-            root = Path(tmp)
+            root = Path(tmp) / "path with spaces"
+            root.mkdir()
             parent = root / "fake-installer.ps1"
+            sleeper_script = root / "fake-sleeper.ps1"
             launcher = root / "fake-installer.cmd"
+            sleeper_script.write_text(
+                "[IO.File]::WriteAllText($env:FAKE_HANDSHAKE, "
+                "\"$PID|$env:FAKE_EXIT\")\n"
+                "Start-Sleep -Seconds 60\n",
+                encoding="utf-8",
+            )
             parent.write_text(
                 "param([string]$Handshake, [int]$ExitCode)\n"
+                "$sleeperArgs = '-NoLogo -NoProfile -ExecutionPolicy Bypass "
+                "-File \"' + $env:FAKE_SLEEPER_SCRIPT + '\"'\n"
                 "$child = Start-Process -FilePath $env:FAKE_PS "
-                "-ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass',"
-                "'-Command','Start-Sleep -Seconds 60') "
+                "-ArgumentList $sleeperArgs "
                 "-PassThru -WindowStyle Hidden\n"
-                "[IO.File]::WriteAllText($Handshake, \"$($child.Id)|$ExitCode\")\n"
                 "exit $ExitCode\n",
                 encoding="utf-8",
             )
@@ -680,6 +875,7 @@ class InstallerWaitTests(unittest.TestCase):
                             "$env:FAKE_PARENT = $args[3]\n"
                             "$env:FAKE_HANDSHAKE = $args[4]\n"
                             "$env:FAKE_EXIT = $args[5]\n"
+                            "$env:FAKE_SLEEPER_SCRIPT = $args[6]\n"
                             # The launch block also observes the operation
                             # mutex. Use its real read function and a unique
                             # name, never the live product's mutex.
@@ -706,6 +902,7 @@ class InstallerWaitTests(unittest.TestCase):
                                 str(parent),
                                 str(handshake),
                                 str(expected),
+                                str(sleeper_script),
                             ],
                             cwd=ROOT,
                             stdout=subprocess.PIPE,
@@ -716,8 +913,6 @@ class InstallerWaitTests(unittest.TestCase):
                         try:
                             deadline = time.monotonic() + 15
                             while time.monotonic() < deadline and not handshake.exists():
-                                if process.poll() is not None:
-                                    break
                                 time.sleep(0.05)
                             if not handshake.exists():
                                 stdout, stderr = process.communicate(timeout=2)
@@ -768,6 +963,7 @@ class InstallerWaitTests(unittest.TestCase):
                     "$env:FAKE_PARENT = $args[3]\n"
                     "$env:FAKE_HANDSHAKE = $args[4]\n"
                     "$env:FAKE_EXIT = $args[5]\n"
+                    "$env:FAKE_SLEEPER_SCRIPT = $args[6]\n"
                     + mutex_function
                     + wait_function
                     + f"$mutationMutexName = 'Local\\SandglassTests.Wait.ReinstallMutant.{uuid.uuid4().hex}'\n"
@@ -776,36 +972,60 @@ class InstallerWaitTests(unittest.TestCase):
                     + "exit $reinstallExitCode\n",
                     encoding="utf-8",
                 )
+                popen_before_ns = time.monotonic_ns()
                 mutated_process = subprocess.Popen(
                     [
                         powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy",
                         "Bypass", "-File", str(runner), str(launcher),
                         str(root / "install-dir"), powershell, str(parent),
-                        str(handshake), "0",
+                        str(handshake), "0", str(sleeper_script),
                     ],
                     cwd=ROOT,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
+                popen_after_ns = time.monotonic_ns()
                 mutant_child_pid = None
+                observed_child = None
                 try:
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline and not handshake.exists():
-                        if mutated_process.poll() is not None:
-                            break
                         time.sleep(0.05)
                     self.assertTrue(handshake.exists(), "-Wait mutant did not publish handshake")
+                    handshake_observed_ns = time.monotonic_ns()
                     mutant_child_pid, recorded = map(int, handshake.read_text().split("|"))
+                    observed_child = _ObservedProcess(mutant_child_pid)
+                    initial_child = observed_child.snapshot()
+                    sleeper_observed_ns = time.monotonic_ns()
                     self.assertEqual(recorded, 0)
-                    self.assertTrue(_alive(mutant_child_pid))
-                    _assert_communicate_times_out(mutated_process, timeout=3)
+                    self.assertEqual(initial_child["state"], "running", initial_child)
+                    _assert_communicate_times_out(
+                        mutated_process,
+                        timeout=3,
+                        descendant=observed_child,
+                        context={
+                            "powershell": powershell,
+                            "powershell_sha256": hashlib.sha256(
+                                Path(powershell).read_bytes()
+                            ).hexdigest(),
+                            "python": sys.version.split()[0],
+                            "windows": platform.version(),
+                            "popen_before_ns": popen_before_ns,
+                            "popen_after_ns": popen_after_ns,
+                            "handshake_observed_ns": handshake_observed_ns,
+                            "sleeper_observed_ns": sleeper_observed_ns,
+                            "sleeper_report": handshake.read_text(encoding="ascii").strip(),
+                        },
+                    )
                 finally:
                     if mutated_process.poll() is None:
                         mutated_process.kill()
                         mutated_process.wait(timeout=2)
                     if mutant_child_pid is not None:
                         _terminate(mutant_child_pid)
+                    if observed_child is not None:
+                        observed_child.close()
 
     def test_timeout_diagnostic_reports_early_error(self):
         """An early installer error exposes its exit code and stderr."""
