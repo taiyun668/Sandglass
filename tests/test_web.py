@@ -1,8 +1,11 @@
+import hashlib
 import unittest
 import json
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sandglass.resources import WEB_DIR
 
@@ -13,14 +16,40 @@ I18N = WEB_DIR / "i18n.js"
 DESKTOP = ROOT / "sandglass" / "desktop.py"
 
 
+class _ScriptSourceParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.sources = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() != "script":
+            return
+        for name, value in attrs:
+            if name.casefold() == "src" and value is not None:
+                self.sources.append(value)
+
+
+def _i18n_script_sources(html: str) -> list[str]:
+    parser = _ScriptSourceParser()
+    parser.feed(html)
+    return [
+        source for source in parser.sources
+        if Path(urlsplit(source).path).name.casefold() == "i18n.js"
+    ]
+
+
 class WebLocalizationTests(unittest.TestCase):
     def test_language_menu_and_catalog_are_shipped(self):
         html = INDEX.read_text(encoding="utf-8")
         catalog = I18N.read_text(encoding="utf-8")
 
-        current_cache_version = "20260908a"
-        self.assertIn(f'<script src="i18n.js?v={current_cache_version}"></script>', html)
-        self.assertNotIn('<script src="i18n.js?v=20260906a"></script>', html)
+        canonical_catalog = I18N.read_text(encoding="utf-8").encode("utf-8")
+        current_cache_version = hashlib.sha256(canonical_catalog).hexdigest()[:12]
+        self.assertEqual(
+            _i18n_script_sources(html),
+            [f"i18n.js?v={current_cache_version}"],
+            "the shipped i18n URL must identify the canonical LF catalog content",
+        )
         self.assertIn('id="app-menu"', html)
         self.assertIn('data-act="language"', html)
         self.assertIn('sandglass.ui.language', html)
@@ -42,6 +71,17 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIn("scrollbar-width: none;", html)
         self.assertIn("function revealSelectedLanguage()", html)
         self.assertIn("revealSelectedLanguage();", html)
+
+    def test_i18n_script_parser_ignores_comments_and_keeps_live_duplicates(self):
+        html = (
+            '<!-- <script src="i18n.js?v=expected"></script> -->'
+            "<script defer src='i18n.js?v=stale'></script>"
+            "<script src='./i18n.js?v=current' async></script>"
+        )
+        self.assertEqual(
+            _i18n_script_sources(html),
+            ["i18n.js?v=stale", "./i18n.js?v=current"],
+        )
 
     def test_update_offer_uses_accessible_badge_and_modal_flow(self):
         html = INDEX.read_text(encoding="utf-8")
