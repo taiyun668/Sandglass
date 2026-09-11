@@ -19,6 +19,14 @@ _ATTRIBUTION_SELF_CHECK_HEARTBEAT = {
     "state": "pending",
     "reason": "",
 }
+_ATTRIBUTION_SELF_CHECK_RECORDED: tuple[str, str] | None = None
+_ATTRIBUTION_SELF_CHECK_PENDING: dict[str, Any] | None = None
+ATTRIBUTION_SELF_CHECK_EVENTS_MAX_BYTES = 256 * 1024
+ATTRIBUTION_SELF_CHECK_EVENT_MAX_BYTES = 1024
+_ATTRIBUTION_SELF_CHECK_EVENT_FIELDS = {
+    "at", "pid", "state", "reason", "check_count",
+}
+_OVERSIZED_ATTRIBUTION_REASON = "attribution self-check reason omitted: oversized"
 _BLOCKED_TEXT = (
     "application control policy",
     "blocked by group policy",
@@ -137,29 +145,94 @@ def attribution_self_check_events_path() -> Path:
     return meter_home() / "attribution-self-check-events.jsonl"
 
 
-def _append_attribution_self_check_event(event: dict[str, Any]) -> None:
-    """Append one durable transition line, serialized across processes.
+def _valid_attribution_event_line(line: bytes) -> bool:
+    if not line.endswith(b"\n") or len(line) > ATTRIBUTION_SELF_CHECK_EVENT_MAX_BYTES:
+        return False
+    try:
+        value = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(value, dict)
+        and set(value) == _ATTRIBUTION_SELF_CHECK_EVENT_FIELDS
+        and isinstance(value.get("at"), str)
+        and isinstance(value.get("pid"), int)
+        and isinstance(value.get("state"), str)
+        and isinstance(value.get("reason"), str)
+        and isinstance(value.get("check_count"), int)
+    )
 
-    This is a distinct log from runtime-diagnostics.json on purpose: that file
-    is overwritten on every clear_component_failure, so a drift that
-    self-heals before anyone looks leaves nothing behind. This file is never
-    truncated, rotated, or capped -- a line, once appended, stays.
+
+def _event_line(event: dict[str, Any]) -> bytes:
+    line = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    if len(line) <= ATTRIBUTION_SELF_CHECK_EVENT_MAX_BYTES:
+        return line
+    event = dict(event, reason=_OVERSIZED_ATTRIBUTION_REASON)
+    return (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _recent_attribution_event_lines(path: Path) -> list[bytes]:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - ATTRIBUTION_SELF_CHECK_EVENTS_MAX_BYTES - 1)
+            handle.seek(start)
+            payload = handle.read(ATTRIBUTION_SELF_CHECK_EVENTS_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return []
+    if start:
+        boundary = payload.find(b"\n")
+        payload = b"" if boundary < 0 else payload[boundary + 1 :]
+    return [line for line in payload.splitlines(keepends=True)
+            if _valid_attribution_event_line(line)]
+
+
+def _append_attribution_self_check_event(event: dict[str, Any]) -> bool:
+    """Atomically retain a byte-bounded suffix of durable transitions.
+
+    This stays distinct from runtime-diagnostics.json so recovery cannot erase
+    the preceding failure. The single JSONL file keeps recent complete events;
+    it never creates an archive or a periodic heartbeat log.
     """
     from sandglass.accounts import state_file_lock
 
     path = attribution_self_check_events_path()
+    temporary = path.with_name("." + path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with state_file_lock(path, lock_name=".attribution-self-check-events.lock"):
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-                )
+            new_line = _event_line(event)
+            history = _recent_attribution_event_lines(path)
+            kept: list[bytes] = []
+            used = len(new_line)
+            for line in reversed(history):
+                if used + len(line) > ATTRIBUTION_SELF_CHECK_EVENTS_MAX_BYTES:
+                    break
+                kept.append(line)
+                used += len(line)
+            payload = b"".join(reversed(kept)) + new_line
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
     except OSError as exc:
         # Not raised: this is bookkeeping beside a self-check result, and the
         # caller (a watcher loop, or an except handler already reporting its
         # own failure) must not be broken by a failure to log about it.
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
         record_component_failure("attribution_self_check_event_write", exc)
+        return False
+    clear_component_failure("attribution_self_check_event_write")
+    return True
 
 
 def record_attribution_self_check_result(state: str, reason: str = "") -> None:
@@ -171,13 +244,12 @@ def record_attribution_self_check_result(state: str, reason: str = "") -> None:
     "did this drift and then recover" once it has recovered. This appends one
     line to attribution-self-check-events.jsonl exactly when (state, reason)
     changes from what this process last recorded, so a self-healing episode
-    survives on disk. Unchanged results append nothing.
+    survives on disk. A failed write leaves the transition pending for the next
+    existing watcher iteration; successfully recorded unchanged results append
+    nothing.
     """
+    global _ATTRIBUTION_SELF_CHECK_RECORDED, _ATTRIBUTION_SELF_CHECK_PENDING
     with _ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
-        previous = (
-            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["state"],
-            _ATTRIBUTION_SELF_CHECK_HEARTBEAT["reason"],
-        )
         if state == "ok":
             _ATTRIBUTION_SELF_CHECK_HEARTBEAT["last_ok_at"] = datetime.now(
                 timezone.utc
@@ -186,17 +258,28 @@ def record_attribution_self_check_result(state: str, reason: str = "") -> None:
         _ATTRIBUTION_SELF_CHECK_HEARTBEAT["state"] = state
         _ATTRIBUTION_SELF_CHECK_HEARTBEAT["reason"] = reason
         check_count = _ATTRIBUTION_SELF_CHECK_HEARTBEAT["check_count"]
-        changed = previous != (state, reason)
-    if not changed:
-        return
-    event = {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "pid": os.getpid(),
-        "state": state,
-        "reason": reason,
-        "check_count": check_count,
-    }
-    _append_attribution_self_check_event(event)
+        current = (state, reason)
+        if _ATTRIBUTION_SELF_CHECK_PENDING is not None:
+            pending = _ATTRIBUTION_SELF_CHECK_PENDING
+            if not _append_attribution_self_check_event(pending):
+                return
+            _ATTRIBUTION_SELF_CHECK_RECORDED = (
+                str(pending["state"]), str(pending["reason"])
+            )
+            _ATTRIBUTION_SELF_CHECK_PENDING = None
+        if _ATTRIBUTION_SELF_CHECK_RECORDED == current:
+            return
+        event = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "state": state,
+            "reason": reason,
+            "check_count": check_count,
+        }
+        if _append_attribution_self_check_event(event):
+            _ATTRIBUTION_SELF_CHECK_RECORDED = current
+        else:
+            _ATTRIBUTION_SELF_CHECK_PENDING = event
 
 
 def record_attribution_self_check_success() -> None:

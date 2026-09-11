@@ -83,15 +83,21 @@ class AttributionSelfCheckTests(unittest.TestCase):
 
         with diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
             saved = dict(diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT)
+            saved_recorded = diagnostics._ATTRIBUTION_SELF_CHECK_RECORDED
+            saved_pending = diagnostics._ATTRIBUTION_SELF_CHECK_PENDING
             diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT.update(
                 last_ok_at=None, check_count=0, state="pending", reason=""
             )
+            diagnostics._ATTRIBUTION_SELF_CHECK_RECORDED = None
+            diagnostics._ATTRIBUTION_SELF_CHECK_PENDING = None
         try:
             yield diagnostics
         finally:
             with diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT_LOCK:
                 diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT.clear()
                 diagnostics._ATTRIBUTION_SELF_CHECK_HEARTBEAT.update(saved)
+                diagnostics._ATTRIBUTION_SELF_CHECK_RECORDED = saved_recorded
+                diagnostics._ATTRIBUTION_SELF_CHECK_PENDING = saved_pending
 
     def test_a_boundary_and_vendor_window_fields_are_ignored(self):
         self.window["counted_from"] = (self.now - timedelta(hours=1, seconds=1)).isoformat()
@@ -405,6 +411,106 @@ class AttributionSelfCheckTests(unittest.TestCase):
         # (the second, unlogged "ok" still counts); "fail" never moves it.
         self.assertEqual([event["check_count"] for event in events], [1, 2, 2, 3])
         self.assertTrue(all(event["pid"] == os.getpid() for event in events))
+
+    def test_l_event_log_is_byte_bounded_and_keeps_newest_complete_events(self):
+        from sandglass import diagnostics
+
+        path = self.meter / "attribution-self-check-events.jsonl"
+        old = []
+        for index in range(4000):
+            event = {"at": f"old-{index}", "pid": 1, "state": "fail",
+                     "reason": f"reason-{index}", "check_count": index}
+            old.append((json.dumps(event, separators=(",", ":")) + "\n").encode())
+        path.write_bytes(b"broken\xff\n" + b"".join(old) + b'{"partial":')
+        with self._fresh_heartbeat(), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter):
+            diagnostics.record_attribution_self_check_result("fail", "newest-fail")
+            diagnostics.record_attribution_self_check_result("ok")
+        payload = path.read_bytes()
+        events = [json.loads(line) for line in payload.decode().splitlines()]
+        self.assertLessEqual(len(payload), 256 * 1024)
+        self.assertEqual(
+            [(event["state"], event["reason"]) for event in events[-2:]],
+            [("fail", "newest-fail"), ("ok", "")],
+        )
+        self.assertTrue(all(set(event) == diagnostics._ATTRIBUTION_SELF_CHECK_EVENT_FIELDS
+                            for event in events))
+
+    def test_l_oversized_multibyte_reason_is_replaced_safely(self):
+        from sandglass import diagnostics
+
+        with self._fresh_heartbeat(), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter):
+            diagnostics.record_attribution_self_check_result("fail", "界" * 2000)
+            line = diagnostics.attribution_self_check_events_path().read_bytes()
+        self.assertLessEqual(len(line), 1024)
+        event = json.loads(line.decode("utf-8"))
+        self.assertEqual(event["reason"], diagnostics._OVERSIZED_ATTRIBUTION_REASON)
+
+    def test_l_failed_replace_retries_same_transition_then_stays_stable(self):
+        from sandglass import diagnostics
+
+        path = self.meter / "attribution-self-check-events.jsonl"
+        original = b'{"at":"old","pid":1,"state":"ok","reason":"","check_count":1}\n'
+        path.write_bytes(original)
+        real_replace = os.replace
+        calls = []
+
+        def replace_once(source, destination):
+            calls.append(1)
+            if len(calls) == 1:
+                raise PermissionError("fixture")
+            return real_replace(source, destination)
+
+        with self._fresh_heartbeat(), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.record_component_failure"), \
+             patch("sandglass.diagnostics.clear_component_failure"), \
+             patch("sandglass.diagnostics.os.replace", side_effect=replace_once):
+            diagnostics.record_attribution_self_check_result("fail", "retry")
+            self.assertEqual(path.read_bytes(), original)
+            diagnostics.record_attribution_self_check_result("fail", "retry")
+            after_retry = path.read_bytes()
+            diagnostics.record_attribution_self_check_result("fail", "retry")
+            self.assertEqual(path.read_bytes(), after_retry)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(json.loads(after_retry.decode().splitlines()[-1])["reason"], "retry")
+        self.assertFalse(path.with_name("." + path.name + ".tmp").exists())
+
+    def test_l_failed_transition_is_written_before_a_recovery(self):
+        from sandglass import diagnostics
+
+        with self._fresh_heartbeat(), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter):
+            diagnostics.record_attribution_self_check_result("ok")
+            real_append = diagnostics._append_attribution_self_check_event
+            attempts = []
+
+            def fail_once(event):
+                attempts.append((event["state"], event["reason"]))
+                if len(attempts) == 1:
+                    return False
+                return real_append(event)
+
+            with patch(
+                "sandglass.diagnostics._append_attribution_self_check_event",
+                side_effect=fail_once,
+            ):
+                diagnostics.record_attribution_self_check_result("fail", "transient")
+                diagnostics.record_attribution_self_check_result("ok")
+
+            events = [
+                json.loads(line) for line in
+                diagnostics.attribution_self_check_events_path().read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual(attempts, [("fail", "transient"), ("fail", "transient"), ("ok", "")])
+        self.assertEqual(
+            [(event["state"], event["reason"]) for event in events],
+            [("ok", ""), ("fail", "transient"), ("ok", "")],
+        )
 
     def test_l_exception_reason_is_type_name_only_no_message_or_path(self):
         from sandglass import diagnostics
