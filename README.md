@@ -15,13 +15,13 @@ menu: **English · 简体中文 · 繁體中文 · Español · Français · Deut
 
 ## Download for Windows 10/11 x64
 
-### [Download the installer — recommended](https://github.com/taiyun668/Sandglass/releases/download/v0.1.9/Sandglass-0.1.9-windows-x64-unsigned-setup.exe)
+### [Download the installer — recommended](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/Sandglass-0.1.10-windows-x64-unsigned-setup.exe)
 
 Choose this for normal use. It installs Sandglass for the current Windows user,
 creates Desktop and Start Menu shortcuts, launches the app, and supports future
 in-app updates. **Start at login stays off unless you enable it in Sandglass.**
 
-### [Download the portable ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.9/Sandglass-0.1.9-windows-x64-unsigned-portable.zip)
+### [Download the portable ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/Sandglass-0.1.10-windows-x64-unsigned-portable.zip)
 
 Choose this if you do not want to install. Extract the entire ZIP, open the
 `Sandglass` folder, and run `Sandglass.exe`. Do not run the EXE from inside the
@@ -36,8 +36,8 @@ channel.
 > it is not a Windows trusted-publisher signature.
 
 [Release notes and all files](https://github.com/taiyun668/Sandglass/releases/latest)
-· [SHA-256 checksums](https://github.com/taiyun668/Sandglass/releases/download/v0.1.9/SHA256SUMS.windows)
-· [Owner signature](https://github.com/taiyun668/Sandglass/releases/download/v0.1.9/SHA256SUMS.windows.sig)
+· [SHA-256 checksums](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/SHA256SUMS.windows)
+· [Owner signature](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/SHA256SUMS.windows.sig)
 
 <p align="center">
   <img src="docs/assets/sandglass-overview.png" alt="Sandglass overview with privacy-safe synthetic demo data" width="360">
