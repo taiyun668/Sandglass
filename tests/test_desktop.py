@@ -1,8 +1,10 @@
+import errno
 import json
 import hashlib
 import os
 import sys
 import threading
+import traceback
 import unittest
 import urllib.error
 import urllib.request
@@ -38,6 +40,88 @@ from sandglass.desktop import (
     _webview_start_options,
     main as desktop_main,
 )
+
+
+def _diagnostic_path(value, home: Path) -> str | None:
+    """Keep useful test paths without publishing a runner's absolute home."""
+    if not value:
+        return None
+    candidate = Path(value)
+    roots = (
+        (home, "<home>"),
+        (Path(__file__).resolve().parents[1], "<repo>"),
+    )
+    for root, label in roots:
+        try:
+            relative = candidate.resolve(strict=False).relative_to(
+                root.resolve(strict=False)
+            )
+        except (OSError, ValueError):
+            continue
+        return f"{label}/{relative.as_posix()}"
+    return candidate.name
+
+
+def _exception_diagnostic(exc, *, home: Path, writer_index, thread_id,
+                          replace_events) -> dict:
+    """Preserve the caught exception's operation frame and original fields."""
+    chain = []
+    current = exc
+    relation = "raised"
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        frames = [
+            {
+                "file": _diagnostic_path(frame.filename, home),
+                "function": frame.name,
+                "line": frame.lineno,
+            }
+            for frame in traceback.extract_tb(current.__traceback__)
+        ]
+        chain.append({
+            "relation": relation,
+            "type": type(current).__name__,
+            "errno": getattr(current, "errno", None),
+            "winerror": getattr(current, "winerror", None),
+            "filename": _diagnostic_path(getattr(current, "filename", None), home),
+            "filename2": _diagnostic_path(getattr(current, "filename2", None), home),
+            "frames": frames,
+        })
+        if current.__cause__ is not None:
+            current = current.__cause__
+            relation = "cause"
+        else:
+            current = current.__context__
+            relation = "context"
+    return {
+        "writer_index": writer_index,
+        "thread_id": thread_id,
+        "exception_chain": chain,
+        "replace_events": [
+            event for event in replace_events
+            if event["thread_id"] == thread_id
+        ],
+    }
+
+
+def _assert_concurrent_state_complete(present, expected, reported,
+                                      replace_events) -> None:
+    ordered_events = sorted(
+        replace_events,
+        key=lambda event: (
+            event.get("writer_index") is None,
+            event.get("writer_index") if event.get("writer_index") is not None else -1,
+        ),
+    )
+    if present != expected:
+        raise AssertionError(
+            f"写入丢了。文件里有 {sorted(present)}；"
+            f"报出来的写入失败 {reported}；"
+            f"replace 阶段 {ordered_events}"
+        )
+
+
 from sandglass.orb import (WM_ORB_ACTIVATE, WM_ORB_UNINSTALL,
                            activate_existing_orb, animate_window_reveal,
                            request_existing_orb_uninstall)
@@ -608,44 +692,114 @@ class DesktopWindowControlTests(unittest.TestCase):
 
             def read_text(self, *args, **kwargs):
                 if self.name == "desktop.json":
-                    raise PermissionError("desktop.json is locked")
+                    raise PermissionError(
+                        errno.EACCES, "desktop.json is locked", str(path)
+                    )
                 return real_read(self, *args, **kwargs)
+
+            def report(name, exc):
+                reported.append({
+                    "component": name,
+                    **_exception_diagnostic(
+                        exc, home=home, writer_index="controlled-read",
+                        thread_id=threading.get_ident(), replace_events=[],
+                    ),
+                })
 
             with patch("sandglass.desktop.meter_home", return_value=home), \
                     patch.object(Path, "read_text", read_text), \
                     patch("sandglass.desktop.record_component_failure",
-                          lambda name, exc: reported.append(name)), \
+                          report), \
                     patch("sandglass.desktop.clear_component_failure",
                           lambda name: None):
                 _save_state(new=3)
 
             self.assertEqual(path.read_text(encoding="utf-8"), original)
-            self.assertEqual(reported, ["desktop_state_write"])
+            self.assertEqual(len(reported), 1)
+            self.assertEqual(reported[0]["component"], "desktop_state_write")
+            self.assertEqual(reported[0]["writer_index"], "controlled-read")
+            caught = reported[0]["exception_chain"][0]
+            self.assertEqual(caught["type"], "PermissionError")
+            self.assertEqual(caught["errno"], errno.EACCES)
+            self.assertEqual(caught["filename"], "<home>/desktop.json")
+            functions = [frame["function"] for frame in caught["frames"]]
+            self.assertIn("_save_state", functions)
+            self.assertIn("_load_state", functions)
+            self.assertIn("read_text", functions)
+            self.assertEqual(reported[0]["replace_events"], [])
 
     def test_concurrent_state_updates_keep_all_keys_and_replace_atomically(self):
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
             replace_calls = []
+            replace_events = []
             errors = []
             barrier = threading.Barrier(8)
             real_replace = os.replace
+            evidence_lock = threading.Lock()
+            writer_by_thread = {}
 
             def replace(source, destination):
-                replace_calls.append((Path(source), Path(destination)))
-                return real_replace(source, destination)
+                thread_id = threading.get_ident()
+                event = {
+                    "thread_id": thread_id,
+                    "writer_index": writer_by_thread.get(thread_id),
+                    "source": _diagnostic_path(source, home),
+                    "destination": _diagnostic_path(destination, home),
+                    "outcome": "started",
+                }
+                with evidence_lock:
+                    replace_calls.append((Path(source), Path(destination)))
+                    replace_events.append(event)
+                try:
+                    result = real_replace(source, destination)
+                except BaseException as exc:  # noqa: BLE001 - preserve test evidence
+                    event.update({
+                        "outcome": "error",
+                        "error_type": type(exc).__name__,
+                        "errno": getattr(exc, "errno", None),
+                        "winerror": getattr(exc, "winerror", None),
+                    })
+                    raise
+                event["outcome"] = "success"
+                return result
 
             def writer(index):
+                thread_id = threading.get_ident()
+                with evidence_lock:
+                    writer_by_thread[thread_id] = index
                 try:
                     barrier.wait(timeout=5)
                     _save_state(**{f"concurrent_{index}": index})
                 except BaseException as exc:  # noqa: BLE001 - report thread failures
-                    errors.append(exc)
+                    with evidence_lock:
+                        events = list(replace_events)
+                    detail = _exception_diagnostic(
+                        exc, home=home, writer_index=index,
+                        thread_id=thread_id, replace_events=events,
+                    )
+                    detail["type"] = type(exc).__name__
+                    with evidence_lock:
+                        errors.append(detail)
+
+            def report(name, exc):
+                thread_id = threading.get_ident()
+                with evidence_lock:
+                    writer_index = writer_by_thread.get(thread_id)
+                    events = list(replace_events)
+                detail = _exception_diagnostic(
+                    exc, home=home, writer_index=writer_index,
+                    thread_id=thread_id, replace_events=events,
+                )
+                detail["component"] = name
+                with evidence_lock:
+                    reported.append(detail)
 
             reported = []
             with patch("sandglass.desktop.meter_home", return_value=home), \
                     patch("sandglass.desktop.os.replace", side_effect=replace), \
                     patch("sandglass.desktop.record_component_failure",
-                          lambda name, exc: reported.append((name, repr(exc)))), \
+                          report), \
                     patch("sandglass.desktop.clear_component_failure",
                           lambda name: None):
                 threads = [threading.Thread(target=writer, args=(index,))
@@ -667,7 +821,7 @@ class DesktopWindowControlTests(unittest.TestCase):
 
                 saved = json.loads((home / "desktop.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(errors, [])
+        self.assertEqual(errors, [], f"writer thread failures: {errors}")
         # Say what was found, not just that one key was missing. This failed
         # twice in full suites -- concurrent_7 once, concurrent_0 once -- and
         # the bare KeyError left nothing to tell a single lost write from a
@@ -677,11 +831,8 @@ class DesktopWindowControlTests(unittest.TestCase):
             int(value) for key, value in saved.items()
             if key.startswith("concurrent_")
         }
-        self.assertEqual(
-            present, set(range(8)),
-            f"写入丢了。文件里有 {sorted(present)}；"
-            f"报出来的写入失败 {reported}；"
-            f"replace 调用 {len(replace_calls)} 次",
+        _assert_concurrent_state_complete(
+            present, set(range(8)), reported, replace_events,
         )
         self.assertEqual(reported, [], "有写入失败被报出来,它就是丢掉的那一次")
         self.assertEqual(len(replace_calls), 8)
@@ -689,6 +840,34 @@ class DesktopWindowControlTests(unittest.TestCase):
             self.assertTrue(source.name.startswith(".desktop.json."))
             self.assertTrue(source.name.endswith(".tmp"))
             self.assertEqual(destination, home / "desktop.json")
+
+    def test_missing_concurrent_key_reports_each_writer_replace_stage(self):
+        events = [
+            {
+                "thread_id": 20,
+                "writer_index": 2,
+                "source": "<home>/.desktop.json.1.20.tmp",
+                "destination": "<home>/desktop.json",
+                "outcome": "success",
+            },
+            {
+                "thread_id": 10,
+                "writer_index": 1,
+                "source": "<home>/.desktop.json.1.10.tmp",
+                "destination": "<home>/desktop.json",
+                "outcome": "error",
+                "errno": errno.EACCES,
+            },
+        ]
+        with self.assertRaisesRegex(AssertionError, "replace 阶段") as raised:
+            _assert_concurrent_state_complete({0, 2}, {0, 1, 2}, [], events)
+        message = str(raised.exception)
+        self.assertIn("'writer_index': 1", message)
+        self.assertIn("'writer_index': 2", message)
+        self.assertLess(message.index("'writer_index': 1"),
+                        message.index("'writer_index': 2"))
+        self.assertIn("'outcome': 'error'", message)
+        self.assertIn("'errno': 13", message)
 
     @patch("sandglass.desktop.clear_component_failure")
     @patch("sandglass.desktop.record_component_failure")
