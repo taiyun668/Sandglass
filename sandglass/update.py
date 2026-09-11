@@ -1,11 +1,11 @@
-"""Whether a newer Sandglass has been published, and installing it if so.
+"""Whether a newer Sandglass has been published, preparing and installing it.
 
-Two things this deliberately will not do. It never downloads during a check, so
-opening the panel costs one small request and nothing else. And it never runs an
-installer it cannot vouch for: the release has to publish a checksum file beside
-the installer, the download has to match it, and that manifest has to carry the
-Owner's detached signature. The signed manifest is the release identity used by
-the public unsigned installer route.
+A desktop check starts one background preparation: the release must publish a
+checksum file beside the installer, that manifest must carry the Owner's
+detached signature, and the downloaded bytes must match it before an update
+button is shown. Clicking still refreshes the small release identity and hashes
+the prepared file again, but never waits for the installer download. Nothing is
+executed before the user confirms.
 
 Nothing here can offer anything until a release exists to find. That is the
 correct dark state, not a failure.
@@ -22,7 +22,6 @@ import re
 import secrets
 import subprocess
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -61,6 +60,14 @@ _LOCK = threading.RLock()
 _FIRST_AVAILABLE_UPDATE_DONE = False
 _UPDATE_GATE_NAME = "update-apply.lock"
 _UPDATE_GATE: tuple[Path, Any] | None = None
+_UPDATE_GATE_CONDITION = threading.Condition(_LOCK)
+_PREPARE_WORKER: threading.Thread | None = None
+_PREPARE_PENDING = False
+_PREPARE_PENDING_FORCE = False
+_STAGED_FIELD = "staged_update"
+_STAGED_DIR = "update-cache"
+_STAGED_INSTALLER = "installer.exe"
+_STAGED_PARTIAL = "installer.part"
 
 
 class UpdateBusyError(RuntimeError):
@@ -75,6 +82,10 @@ class UpdateStateLockError(RuntimeError):
     """The short-lived cross-process state transaction lock failed."""
 
 
+class UpdateNotReadyError(RuntimeError):
+    """The freshly authorized installer has not been prepared locally."""
+
+
 def _gate_path() -> Path:
     return meter_home() / _UPDATE_GATE_NAME
 
@@ -87,7 +98,7 @@ def _is_lock_contention(exc: OSError) -> bool:
 
 
 def _lock_file(path: Path, *, blocking: bool, error_type: type[RuntimeError],
-               purpose: str):
+               purpose: str, wait_for_contention: bool = False):
     """Open and lock one byte, keeping the handle alive for the context."""
     handle = None
     lock_started = False
@@ -102,8 +113,20 @@ def _lock_file(path: Path, *, blocking: bool, error_type: type[RuntimeError],
         if os.name == "nt":
             import msvcrt
 
-            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-            msvcrt.locking(handle.fileno(), mode, 1)
+            if blocking and wait_for_contention:
+                # LK_LOCK waits in bounded OS-managed intervals. Repeat only
+                # lock acquisition (never metadata/download work) so a
+                # background successor cannot be lost behind another process.
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError as exc:
+                        if not _is_lock_contention(exc):
+                            raise
+            else:
+                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+                msvcrt.locking(handle.fileno(), mode, 1)
         else:
             import fcntl
 
@@ -135,33 +158,48 @@ def _unlock_file(handle: Any) -> None:
         handle.close()
 
 
-def _acquire_update_gate() -> None:
+def _acquire_update_gate(*, blocking: bool = False) -> None:
     """Take a Sandglass-owned cross-process update gate.
 
     The OS byte-range lock is retained after Popen succeeds until this process
     exits.  The OS releases it if the owner crashes, without PID probing
     (``os.kill(pid, 0)`` is destructive on Windows) or stale-owner races.
+    Background preparation waits for an earlier owner so the newer persisted
+    offer always has a consumer. User-triggered apply remains non-blocking.
     """
     global _UPDATE_GATE
-    with _LOCK:
-        if _UPDATE_GATE is not None:
-            raise UpdateBusyError("an update is already in progress")
-        path = _gate_path()
+    path = _gate_path()
+    with _UPDATE_GATE_CONDITION:
+        while _UPDATE_GATE is not None:
+            if not blocking:
+                raise UpdateBusyError("an update is already in progress")
+            _UPDATE_GATE_CONDITION.wait()
+        # Reserve the in-process slot before waiting on another process. This
+        # keeps two local callers from both acquiring separate file handles.
+        _UPDATE_GATE = (path, None)
+    try:
         handle = _lock_file(
-            path, blocking=False, error_type=UpdateGateError,
-            purpose="update apply",
+            path, blocking=blocking, error_type=UpdateGateError,
+            purpose="update apply", wait_for_contention=blocking,
         )
+    except BaseException:
+        with _UPDATE_GATE_CONDITION:
+            _UPDATE_GATE = None
+            _UPDATE_GATE_CONDITION.notify_all()
+        raise
+    with _UPDATE_GATE_CONDITION:
         _UPDATE_GATE = (path, handle)
 
 
 def _release_update_gate() -> None:
     global _UPDATE_GATE
-    with _LOCK:
+    with _UPDATE_GATE_CONDITION:
         gate, _UPDATE_GATE = _UPDATE_GATE, None
-        if gate is None:
-            return
-        _, handle = gate
-        _unlock_file(handle)
+        if gate is not None:
+            _, handle = gate
+            if handle is not None:
+                _unlock_file(handle)
+        _UPDATE_GATE_CONDITION.notify_all()
 
 
 @contextmanager
@@ -372,8 +410,8 @@ def _seconds_since_check(stored: dict[str, Any]) -> float | None:
     was written, which for a long-running machine is days.
 
     A wall clock survives the restart. A clock that has moved backwards, or a
-    value that cannot be read, means check again rather than assume freshness:
-    a check costs one small request and never downloads.
+    value that cannot be read, means check again rather than assume freshness.
+    This function checks only metadata; desktop preparation is a separate worker.
     """
     checked = parse_ts(stored.get("checked_at"))
     if checked is None:
@@ -395,18 +433,18 @@ def _displayable_cached_offer(stored: dict[str, Any]) -> dict[str, Any]:
 def available_update(
     force: bool = False, *, require_fresh: bool = False
 ) -> dict[str, Any]:
-    """Return a display offer without downloading; force refreshes display data.
+    """Return verified release metadata without downloading its installer.
 
     ``require_fresh`` is the installation boundary: it also forces a network
     check and never falls back to a cached offer after a failed check.
     """
     global _FIRST_AVAILABLE_UPDATE_DONE
     first_check = False
+    generation = 0
     try:
         with _LOCK, _state_transaction():
             first_check = not _FIRST_AVAILABLE_UPDATE_DONE
             stored = _read_state()
-            _FIRST_AVAILABLE_UPDATE_DONE = True
             elapsed = _seconds_since_check(stored)
             if (
                 not force
@@ -432,6 +470,18 @@ def available_update(
                     next_state["offer"] = {}
                     _write_state(next_state)
                 return {}
+            previous_generation = stored.get("check_generation")
+            if (
+                not isinstance(previous_generation, int)
+                or isinstance(previous_generation, bool)
+                or previous_generation < 0
+            ):
+                previous_generation = 0
+            generation = previous_generation + 1
+            started_state = dict(stored)
+            started_state["check_generation"] = generation
+            _write_state(started_state)
+            _FIRST_AVAILABLE_UPDATE_DONE = True
     except (OSError, ValueError, UpdateStateLockError) as exc:
         record_component_failure("update_state_write", exc)
         if force or require_fresh:
@@ -448,7 +498,12 @@ def available_update(
         release = json.loads(_get(FEED_URL, MAX_FEED_BYTES).decode("utf-8", "replace"))
         if isinstance(release, dict):
             offer = offer_from(release)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    # Network readers may surface protocol-specific failures such as
+    # http.client.IncompleteRead in addition to urllib/OSError.  Every failure
+    # in this observation interval has the same contract: preserve the last
+    # verified offer, mark the check incomplete, and let the next natural
+    # trigger retry it.
+    except Exception as exc:
         error = type(exc).__name__
 
     try:
@@ -457,6 +512,11 @@ def available_update(
             # fields. In particular, preserve an announcement written by an
             # update handoff while the request was running.
             latest = _read_state()
+            if latest.get("check_generation") != generation:
+                # A later-started check owns the state. This request's answer
+                # may be older even though it completed last, so it cannot
+                # replace the newer offer/error or authorize an install.
+                return {} if require_fresh else _displayable_cached_offer(latest)
             if error:
                 # A failed request is not a completed observation. Keep the
                 # last successful timestamp, version, and offer so a temporary
@@ -522,8 +582,323 @@ def download_verified(offer: dict[str, Any], into: Path) -> Path:
     return into
 
 
+def staged_installer_path() -> Path:
+    return meter_home() / _STAGED_DIR / _STAGED_INSTALLER
+
+
+def staged_partial_path() -> Path:
+    return meter_home() / _STAGED_DIR / _STAGED_PARTIAL
+
+
+def _offer_identity(offer: dict[str, Any]) -> dict[str, str]:
+    version = str(offer.get("version") or "")
+    asset = str(offer.get("asset") or "")
+    sha256 = str(offer.get("sha256") or "").lower()
+    url = _https(str(offer.get("url") or ""))
+    if not version or not _installer_name(asset, version):
+        raise ValueError("the release did not identify its installer")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise ValueError("the release did not publish a usable checksum")
+    if offer.get("manifest_signed") is not True:
+        raise ValueError(
+            "installer lacks a release manifest signed with this project's key"
+        )
+    return {
+        "version": version,
+        "asset": asset,
+        "sha256": sha256,
+        "url": url,
+    }
+
+
+def _stage_matches(value: object, identity: dict[str, str]) -> bool:
+    return (
+        isinstance(value, dict)
+        and all(value.get(key) == expected for key, expected in identity.items())
+    )
+
+
+def _set_stage_state(
+    identity: dict[str, str], status: str, *, error: str = ""
+) -> bool:
+    """Merge one stage result only while the checked offer is still identical."""
+    with _LOCK, _state_transaction():
+        stored = _read_state()
+        offer = stored.get("offer")
+        try:
+            current = _offer_identity(offer) if isinstance(offer, dict) else None
+        except ValueError:
+            current = None
+        if current != identity:
+            return False
+        next_state = dict(stored)
+        next_state[_STAGED_FIELD] = {
+            **identity,
+            "status": status,
+            "error": error,
+        }
+        _write_state(next_state)
+        return True
+
+
+def _clear_stage_locked() -> None:
+    """Clear only Sandglass's two fixed cache files while holding the apply gate."""
+    with _LOCK, _state_transaction():
+        stored = _read_state()
+        if _STAGED_FIELD in stored:
+            next_state = dict(stored)
+            next_state.pop(_STAGED_FIELD, None)
+            _write_state(next_state)
+    for path in (staged_partial_path(), staged_installer_path()):
+        path.unlink(missing_ok=True)
+
+
+def _reconcile_prepared_update() -> None:
+    """Make the fixed cache agree with the latest persisted check result.
+
+    Another process can publish newer metadata while this process owns the
+    cross-process gate.  The owner therefore follows the current persisted
+    state until one identity reaches ``ready`` or a successful no-update check
+    clears the cache. A background contender waits for the gate, then re-reads
+    that same authoritative state; it never acts on the stale result that made
+    it wait.
+    """
+    partial = staged_partial_path()
+    complete = staged_installer_path()
+    # Publish the successor before waiting on another process's long download
+    # or installer handoff. The panel's existing local-status poll can then
+    # distinguish "queued behind the gate" from "no worker is preparing it".
+    with _LOCK, _state_transaction():
+        queued_state = _read_state()
+    queued_offer = _displayable_cached_offer(queued_state)
+    queued_identity: dict[str, str] | None = None
+    queued_written = False
+    if queued_offer:
+        queued_identity = _offer_identity(queued_offer)
+        queued_stage = queued_state.get(_STAGED_FIELD)
+        already_ready = (
+            _stage_matches(queued_stage, queued_identity)
+            and queued_stage.get("status") == "ready"
+            and complete.is_file()
+        )
+        if not already_ready:
+            queued_written = _set_stage_state(queued_identity, "queued")
+    try:
+        _acquire_update_gate(blocking=True)
+    except Exception as exc:  # noqa: BLE001 - queued must not claim a dead worker
+        if queued_written and queued_identity is not None:
+            try:
+                _set_stage_state(
+                    queued_identity, "failed", error=type(exc).__name__
+                )
+            except (OSError, ValueError, UpdateStateLockError) as state_exc:
+                record_component_failure("update_state_write", state_exc)
+        record_component_failure("update_stage_download", exc)
+        return
+    try:
+        while True:
+            with _LOCK, _state_transaction():
+                stored = _read_state()
+            current_offer = _displayable_cached_offer(stored)
+            if not current_offer:
+                # A failed metadata observation keeps the last cache exactly
+                # as it was. Only a completed no-update/invalid result is
+                # authoritative enough to delete prepared bytes.
+                if not stored.get("error"):
+                    _clear_stage_locked()
+                    clear_component_failure("update_stage_download")
+                return
+            identity = _offer_identity(current_offer)
+            try:
+                existing = stored.get(_STAGED_FIELD)
+                reusable = False
+                if _stage_matches(existing, identity) and existing.get("status") == "ready":
+                    try:
+                        reusable = (
+                            _hash_prepared_file(complete) == identity["sha256"]
+                        )
+                    except (FileNotFoundError, OSError, UpdateNotReadyError):
+                        reusable = False
+                if reusable:
+                    clear_component_failure("update_stage_download")
+                    return
+                if not _set_stage_state(identity, "downloading"):
+                    continue
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                partial.unlink(missing_ok=True)
+                download_verified(current_offer, partial)
+                os.replace(partial, complete)
+                if not _set_stage_state(identity, "ready"):
+                    complete.unlink(missing_ok=True)
+                    continue
+                clear_component_failure("update_stage_download")
+                return
+            except Exception as exc:  # noqa: BLE001 - failed bytes must never remain ready
+                for path in (partial, complete):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                try:
+                    recorded = _set_stage_state(
+                        identity, "failed", error=type(exc).__name__
+                    )
+                except (OSError, ValueError, UpdateStateLockError) as state_exc:
+                    record_component_failure("update_state_write", state_exc)
+                    record_component_failure("update_stage_download", exc)
+                    return
+                record_component_failure("update_stage_download", exc)
+                if recorded:
+                    return
+                # The failure belonged to an offer that is no longer current.
+                # Stay on the gate and prepare the persisted successor.
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_stage_download", exc)
+    finally:
+        _release_update_gate()
+
+
+def _prepare_offer(offer: dict[str, Any]) -> None:
+    """Validate a caller's offer, then reconcile against persisted authority."""
+    _offer_identity(offer)
+    _reconcile_prepared_update()
+
+
+def _check_and_prepare(force: bool) -> None:
+    try:
+        available_update(force=force)
+    except Exception as exc:  # noqa: BLE001 - background work reports and stops
+        record_component_failure("update_stage_download", exc)
+        return
+    try:
+        _reconcile_prepared_update()
+    except Exception as exc:  # noqa: BLE001 - daemon work must report and stop
+        record_component_failure("update_stage_download", exc)
+
+
+def _prepare_worker_loop(force: bool) -> None:
+    """Run one check plus the newest coalesced in-process successor request."""
+    global _PREPARE_PENDING, _PREPARE_PENDING_FORCE, _PREPARE_WORKER
+    next_force = force
+    while True:
+        _check_and_prepare(next_force)
+        with _LOCK:
+            if _PREPARE_PENDING:
+                next_force = _PREPARE_PENDING_FORCE
+                _PREPARE_PENDING = False
+                _PREPARE_PENDING_FORCE = False
+                continue
+            # Withdraw the worker identity before returning while holding the
+            # same lock used by request_update_check. A later request either
+            # became pending above or will start a successor; there is no
+            # alive-but-no-longer-listening window.
+            if _PREPARE_WORKER is threading.current_thread():
+                _PREPARE_WORKER = None
+            return
+
+
+def prepared_update_status() -> dict[str, Any]:
+    """Return local preparation state only; never fetch or start background work."""
+    try:
+        with _LOCK, _state_transaction():
+            stored = _read_state()
+            worker_active = (
+                (_PREPARE_WORKER is not None and _PREPARE_WORKER.is_alive())
+                or _PREPARE_PENDING
+            )
+    except (OSError, ValueError, UpdateStateLockError) as exc:
+        record_component_failure("update_state_write", exc)
+        return {"preparing": False, "ready": False}
+    offer = _displayable_cached_offer(stored)
+    if not offer:
+        return {"preparing": worker_active, "ready": False}
+    try:
+        identity = _offer_identity(offer)
+    except ValueError:
+        return {"preparing": worker_active, "ready": False}
+    staged = stored.get(_STAGED_FIELD)
+    if not _stage_matches(staged, identity):
+        return {"preparing": worker_active, "ready": False}
+    if staged.get("status") in {"queued", "downloading"}:
+        return {"preparing": True, "ready": False}
+    if staged.get("status") != "ready" or not staged_installer_path().is_file():
+        return {"preparing": worker_active, "ready": False}
+    return {**offer, "preparing": worker_active, "ready": True}
+
+
+def request_update_check(force: bool = False) -> dict[str, Any]:
+    """Start at most one in-process metadata/preparation worker and return quickly."""
+    global _PREPARE_PENDING, _PREPARE_PENDING_FORCE, _PREPARE_WORKER
+    scheduled = False
+    with _LOCK:
+        if _PREPARE_WORKER is None or not _PREPARE_WORKER.is_alive():
+            _PREPARE_PENDING = False
+            _PREPARE_PENDING_FORCE = False
+            _PREPARE_WORKER = threading.Thread(
+                target=_prepare_worker_loop,
+                args=(force,),
+                name="sandglass-update-prepare",
+                daemon=True,
+            )
+            try:
+                _PREPARE_WORKER.start()
+            except BaseException:
+                _PREPARE_WORKER = None
+                raise
+            scheduled = True
+        else:
+            _PREPARE_PENDING = True
+            _PREPARE_PENDING_FORCE = _PREPARE_PENDING_FORCE or force
+            scheduled = True
+    status = prepared_update_status()
+    # A worker may be refreshing metadata while an older prepared offer is
+    # still valid.  Keep that badge usable, but also keep local status polling
+    # alive so a newly discovered identity becomes visible when preparation
+    # finishes.
+    if scheduled:
+        status["preparing"] = True
+    return status
+
+
+def _hash_prepared_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    read = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1 << 20)
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > MAX_INSTALLER_BYTES:
+                raise UpdateNotReadyError("prepared installer exceeds the release limit")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prepared_installer(offer: dict[str, Any]) -> Path:
+    identity = _offer_identity(offer)
+    with _LOCK, _state_transaction():
+        stored = _read_state()
+        staged = stored.get(_STAGED_FIELD)
+    path = staged_installer_path()
+    if not _stage_matches(staged, identity) or staged.get("status") != "ready":
+        raise UpdateNotReadyError("the freshly authorized update is not prepared")
+    try:
+        actual = _hash_prepared_file(path)
+    except (FileNotFoundError, OSError) as exc:
+        raise UpdateNotReadyError("the prepared installer is unavailable") from exc
+    if actual != identity["sha256"]:
+        try:
+            path.unlink(missing_ok=True)
+            _set_stage_state(identity, "failed", error="checksum_mismatch")
+        except (OSError, ValueError, UpdateStateLockError) as exc:
+            record_component_failure("update_stage_download", exc)
+        raise UpdateNotReadyError("the prepared installer checksum changed")
+    return path
+
+
 def apply_update(offer: dict[str, Any]) -> dict[str, Any]:
-    """Download, verify, then hand over to the installer and leave.
+    """Re-verify the prepared installer, hand it over, and leave.
 
     The installer refuses to write over a running copy, so this does not wait
     for it: it starts the installer detached and returns, and the caller quits.
@@ -538,9 +913,7 @@ def apply_update(offer: dict[str, Any]) -> dict[str, Any]:
     previous_pending: Any = None
     previous_pending_present = False
     try:
-        name = str(offer.get("asset") or "sandglass-setup.exe")
-        staged = Path(tempfile.gettempdir()) / "sandglass-update" / name
-        staged = download_verified(offer, staged)
+        staged = _prepared_installer(offer)
         # The installer creates a private, one-shot named event.  The random
         # token is the only handoff capability; no command-line value is ever
         # interpreted as a path by either side.

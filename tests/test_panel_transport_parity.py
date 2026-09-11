@@ -84,7 +84,10 @@ class PanelTransportParityTests(unittest.TestCase):
         from sandglass import desktop
 
         with patch("sandglass.update.available_update",
-                   return_value={"version": "9.9.9"}):
+                   return_value={"version": "9.9.9"}), patch(
+            "sandglass.update.request_update_check",
+            return_value={"version": "9.9.9", "ready": True},
+        ):
             standalone = serve.api_payload("/api/update", live_quota=False)
             native = desktop._desktop_api(_Receiver(), "GET", "/api/update")
         self.assertFalse(standalone["apply_supported"])
@@ -108,7 +111,10 @@ class PanelTransportParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"SANDGLASS_HOME": tmp}
         ), patch("sandglass.update.available_update",
-                 return_value={"version": "9.9.9"}):
+                 return_value={"version": "9.9.9"}), patch(
+            "sandglass.update.request_update_check",
+            return_value={"version": "9.9.9", "ready": True},
+        ):
             fallback = start(update_apply=lambda body: {"ok": True})
             payload = json.loads(urllib.request.urlopen(
                 f"http://127.0.0.1:{fallback.server_port}/api/update", timeout=10

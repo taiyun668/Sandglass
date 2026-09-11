@@ -440,13 +440,18 @@ def apply_telemetry_receiver(receiver: TelemetryReceiver, body: str) -> dict:
 def apply_update_request(shell, body: str) -> dict:
     """Verify and hand over to the installer, then close the panel.
 
-    The order is deliberate. Downloading and checking can fail and the user has
-    to be told, so that happens while the panel is still up. Only once the file
-    is proven does this start the installer and quit -- the installer refuses to
-    write over a running copy, which is what makes that ordering necessary
-    rather than merely tidy.
+    The order is deliberate. The fresh metadata/signature check and local file
+    rehash can fail and the user has to be told, so they happen while the panel
+    is still up. Only once the prepared file is proven does this start the
+    installer and quit -- the installer refuses to write over a running copy,
+    which is what makes that ordering necessary rather than merely tidy.
     """
-    from sandglass.update import apply_update, available_update
+    from sandglass.update import (
+        UpdateNotReadyError,
+        apply_update,
+        available_update,
+        request_update_check,
+    )
 
     try:
         envelope = json.loads(body) if body else {}
@@ -467,8 +472,10 @@ def apply_update_request(shell, body: str) -> dict:
     except Exception as exc:  # noqa: BLE001 - fail closed while panel remains up
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
     if not isinstance(offer, dict) or not offer:
+        request_update_check()
         return {"ok": False, "error": "no_update"}
     if offer.get("version") != requested_version:
+        request_update_check()
         return {"ok": False, "error": "stale_update"}
     try:
         result = apply_update(offer)
@@ -477,6 +484,9 @@ def apply_update_request(shell, body: str) -> dict:
 
         if isinstance(exc, UpdateBusyError):
             return {"ok": False, "error": "update_busy"}
+        if isinstance(exc, UpdateNotReadyError):
+            request_update_check()
+            return {"ok": False, "error": "update_not_ready"}
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
     if not isinstance(result, dict) or result.get("ok") is not True:
         return result if isinstance(result, dict) else {"ok": False, "error": "apply_failed"}

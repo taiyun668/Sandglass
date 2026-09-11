@@ -244,13 +244,24 @@ def api_payload(target: str, *, since: str | None = None,
     if parsed.path == "/api/attribution-diagnostics":
         return _note_answer("attribution_diagnostics", _attribution_diagnostics())
     if parsed.path == "/api/update":
-        from sandglass.update import available_update
+        from sandglass.update import available_update, request_update_check
 
-        offer = available_update(force="force" in parse_qs(parsed.query))
+        force = "force" in parse_qs(parsed.query)
+        offer = (
+            request_update_check(force=force)
+            if apply_supported
+            else available_update(force=force)
+        )
         # Keep capability separate from the offer.  A standalone ``serve``
         # process can display updates but has no desktop shell to quit before
         # the installer replaces files, so it must never expose apply.
         payload = dict(offer) if isinstance(offer, dict) else {}
+        payload["apply_supported"] = bool(apply_supported)
+        return payload
+    if parsed.path == "/api/update/status":
+        from sandglass.update import prepared_update_status
+
+        payload = prepared_update_status()
         payload["apply_supported"] = bool(apply_supported)
         return payload
     if parsed.path == "/api/update/announcement":

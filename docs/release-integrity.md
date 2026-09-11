@@ -24,9 +24,13 @@ copies.
 
 The updater offers only a newer non-prerelease version with the exact expected
 installer and manifest assets. It verifies the manifest signature with Windows
-CNG, requires exactly one matching SHA-256 entry, downloads the installer,
-hashes it again and only then starts the visible `/UPDATE` handoff. A missing or
-invalid signature, ambiguous checksum entry or changed installer is rejected.
+CNG and requires exactly one matching SHA-256 entry. The desktop then downloads
+the installer in the background into its own bounded update cache; no install
+button is shown until those bytes match the signed manifest. Confirmation makes
+a fresh metadata/signature check and hashes the prepared installer again, then
+starts the visible `/UPDATE` handoff without downloading the large file again.
+A missing or invalid signature, ambiguous checksum entry, stale release identity
+or changed installer is rejected.
 
 This detached signature is release integrity, not Windows publisher identity.
 The binaries remain unsigned community packages, so Windows may show an
@@ -38,7 +42,9 @@ certificate requirement to the Sandglass build or updater.
 
 A release is admitted by product lifecycle evidence: the published artifacts
 match their signed manifest, the installer and portable bundle launch on a real
-interactive Windows desktop, update and restart preserve user state, uninstall
-cleans product-owned paths, and provider directories remain byte-for-byte
-unchanged. Windows code signing can be reconsidered independently in the
-future; it is not part of the current release gate.
+interactive Windows desktop, update and restart preserve user state, and
+uninstall removes the installed program files while `SANDGLASS_HOME` remains
+unless the user removes it manually (usage cache, settings, and any update
+cache). Provider directories remain byte-for-byte unchanged. Windows code
+signing can be reconsidered independently in the future; it is not part of the
+current release gate.

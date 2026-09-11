@@ -2102,6 +2102,7 @@
       telemetry: null,
       diagnostics: null,
       update: null,
+      updatePreparing: false,
       updateDialogOpen: false,
       updateApplying: false,
       updateError: "",
@@ -3093,7 +3094,7 @@
     }
 
     function normalizeUpdateOffer(offer) {
-      return offer && offer.version && offer.apply_supported === true ? offer : null;
+      return offer && offer.version && offer.ready === true && offer.apply_supported === true ? offer : null;
     }
 
     async function loadUpdate(force = false) {
@@ -3105,9 +3106,24 @@
           return;
         }
         const offer = await response.json();
+        state.updatePreparing = offer && offer.preparing === true;
         state.update = normalizeUpdateOffer(offer);
       } catch (_) {
         state.update = null;
+        state.updatePreparing = false;
+      }
+      render();
+    }
+
+    async function loadUpdateStatus() {
+      try {
+        const response = await fetch("/api/update/status");
+        if (!response.ok) return;
+        const offer = await response.json();
+        state.updatePreparing = offer && offer.preparing === true;
+        state.update = normalizeUpdateOffer(offer);
+      } catch (_) {
+        return;
       }
       render();
     }
@@ -3199,6 +3215,11 @@
         const result = response.ok ? await response.json() : { ok: false };
         if (result.ok) return;          // the panel is closing; leave it disabled
         state.updateError = String(result.error || "failed");
+        if (["update_not_ready", "stale_update", "no_update"].includes(state.updateError)) {
+          state.update = null;
+          state.updatePreparing = true;
+          state.updateDialogOpen = false;
+        }
       } catch (_) {
         state.updateError = "failed";
       }
@@ -4200,7 +4221,10 @@
     let stampTick = null;
     function startPoll() {
       if (poll) clearInterval(poll);
-      poll = setInterval(loadQuota, POLL_MS);
+      poll = setInterval(() => {
+        if (state.productMode.selected) loadQuota();
+        if (state.updatePreparing && !state.updateApplying && !state.updateDialogOpen && !state.announcementOpen) loadUpdateStatus();
+      }, POLL_MS);
       if (!stampTick) stampTick = setInterval(paintStamps, 1000);
     }
     function startUpdatePoll() {
@@ -4210,6 +4234,7 @@
       }, UPDATE_POLL_MS);
     }
     render();
+    startPoll();
     loadUpdate();
     loadAnnouncement();
     startUpdatePoll();

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sys
 import threading
@@ -265,11 +266,13 @@ class UpdateApplyRequestTests(unittest.TestCase):
             }
         }
         with patch("sandglass.update.available_update", return_value={}) as check, \
-                patch("sandglass.update.apply_update") as apply:
+                patch("sandglass.update.apply_update") as apply, \
+                patch("sandglass.update.request_update_check") as prepare:
             result = apply_update_request(shell, json.dumps(forged))
 
         check.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_not_called()
+        prepare.assert_called_once_with()
         shell.quit.assert_not_called()
         self.assertFalse(result["ok"])
 
@@ -281,11 +284,13 @@ class UpdateApplyRequestTests(unittest.TestCase):
             return {} if require_fresh else cached
 
         with patch("sandglass.update.available_update", side_effect=check) as check_mock, \
-                patch("sandglass.update.apply_update") as apply:
+                patch("sandglass.update.apply_update") as apply, \
+                patch("sandglass.update.request_update_check") as prepare:
             result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
 
         check_mock.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_not_called()
+        prepare.assert_called_once_with()
         shell.quit.assert_not_called()
         self.assertEqual(result, {"ok": False, "error": "no_update"})
 
@@ -293,13 +298,35 @@ class UpdateApplyRequestTests(unittest.TestCase):
         shell = Mock()
         with patch("sandglass.update.available_update",
                    return_value={"version": "9.9.8"}) as check, \
-                patch("sandglass.update.apply_update") as apply:
+                patch("sandglass.update.apply_update") as apply, \
+                patch("sandglass.update.request_update_check") as prepare:
             result = apply_update_request(shell, json.dumps({"version": "9.9.9"}))
 
         check.assert_called_once_with(force=True, require_fresh=True)
         apply.assert_not_called()
+        prepare.assert_called_once_with()
         shell.quit.assert_not_called()
         self.assertEqual(result, {"ok": False, "error": "stale_update"})
+
+    def test_missing_prepared_bytes_start_background_work_without_quitting(self):
+        from sandglass.update import UpdateNotReadyError
+
+        shell = Mock()
+        authoritative = {"version": "9.9.9"}
+        with patch("sandglass.update.available_update",
+                   return_value=authoritative) as check, \
+                patch("sandglass.update.apply_update",
+                      side_effect=UpdateNotReadyError("not ready")) as apply, \
+                patch("sandglass.update.request_update_check") as prepare:
+            result = apply_update_request(
+                shell, json.dumps({"version": "9.9.9"})
+            )
+
+        check.assert_called_once_with(force=True, require_fresh=True)
+        apply.assert_called_once_with(authoritative)
+        prepare.assert_called_once_with()
+        shell.quit.assert_not_called()
+        self.assertEqual(result, {"ok": False, "error": "update_not_ready"})
 
     def test_success_uses_revalidated_offer_and_quits_once(self):
         shell = Mock()
@@ -330,6 +357,96 @@ class UpdateApplyRequestTests(unittest.TestCase):
         apply.assert_called_once_with(authoritative)
         shell.quit.assert_called_once_with()
         self.assertEqual(result["version"], "9.9.9")
+
+    def test_click_refreshes_identity_but_never_downloads_the_prepared_exe(self):
+        from sandglass import update
+
+        payload = b"already prepared installer"
+        version = "9.9.9"
+        asset = f"Sandglass-{version}-windows-x64-unsigned-setup.exe"
+        installer_url = (
+            f"https://github.com/taiyun668/Sandglass/releases/download/"
+            f"v{version}/{asset}"
+        )
+        sums_url = "https://github.com/example/project/SHA256SUMS.windows"
+        signature_url = "https://github.com/example/project/SHA256SUMS.windows.sig"
+        digest = hashlib.sha256(payload).hexdigest()
+        sums = f"# Sandglass-Version: {version}\n{digest}  {asset}\n".encode()
+        release = {
+            "tag_name": f"v{version}",
+            "prerelease": False,
+            "published_at": "2026-09-11T00:00:00Z",
+            "html_url": f"https://github.com/example/project/releases/tag/v{version}",
+            "body": "prepared update",
+            "assets": [
+                {"name": asset, "browser_download_url": installer_url},
+                {"name": update.CHECKSUMS_NAME, "browser_download_url": sums_url},
+                {"name": update.CHECKSUMS_SIGNATURE_NAME,
+                 "browser_download_url": signature_url},
+            ],
+        }
+        offer = {
+            "version": version,
+            "asset": asset,
+            "url": installer_url,
+            "sha256": digest,
+            "manifest_signed": True,
+            "published_at": release["published_at"],
+            "notes_url": release["html_url"],
+            "notes": release["body"],
+        }
+        shell = Mock()
+        shell.quit.return_value = True
+        process = Mock()
+        calls = []
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"SANDGLASS_HOME": tmp}, clear=False
+        ):
+            staged = update.staged_installer_path()
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(payload)
+            update.state_path().write_text(json.dumps({
+                "offer": offer,
+                update._STAGED_FIELD: {
+                    **update._offer_identity(offer),
+                    "status": "ready",
+                    "error": "",
+                },
+            }), encoding="utf-8")
+
+            def get(url, limit, timeout=20.0):
+                calls.append(url)
+                if url == update.FEED_URL:
+                    return json.dumps(release).encode()
+                if url == sums_url:
+                    return sums
+                if url == signature_url:
+                    return b"00" * 64
+                raise AssertionError(f"unexpected download: {url}")
+
+            try:
+                with patch("sandglass.update._get", side_effect=get), patch(
+                    "sandglass.release_signature.verify_release_signature",
+                    return_value=True,
+                ), patch(
+                    "sandglass.update.download_verified",
+                    side_effect=AssertionError("click must not download the installer"),
+                ) as download, patch(
+                    "subprocess.Popen", return_value=process
+                ) as popen:
+                    result = apply_update_request(
+                        shell, json.dumps({"version": version})
+                    )
+            finally:
+                update._release_update_gate()
+
+        download.assert_not_called()
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [update.FEED_URL, sums_url, signature_url])
+        self.assertNotIn(installer_url, calls)
+        self.assertEqual(Path(popen.call_args.args[0][0]), staged)
+        shell.quit.assert_called_once_with()
 
     def test_failed_desktop_shutdown_cancels_waiting_installer_and_reports_failure(self):
         shell = Mock()

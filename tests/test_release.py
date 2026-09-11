@@ -1175,11 +1175,38 @@ class RunningInstallLifecycleTests(unittest.TestCase):
 
         seen = []
         with tempfile.TemporaryDirectory() as tmp:
+            payload = b"prepared installer protocol fixture"
+            version = "9.9.9"
+            asset = f"Sandglass-{version}-windows-x64-unsigned-setup.exe"
+            offer = {
+                "asset": asset,
+                "version": version,
+                "url": (
+                    "https://github.com/taiyun668/Sandglass/releases/download/"
+                    f"v{version}/{asset}"
+                ),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "manifest_signed": True,
+            }
             try:
-                with mock.patch.dict(os.environ, {"SANDGLASS_HOME": tmp}), \
-                        mock.patch.object(update, "download_verified", lambda offer, into: into), \
+                with mock.patch.dict(os.environ, {"SANDGLASS_HOME": tmp}):
+                    staged = update.staged_installer_path()
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    staged.write_bytes(payload)
+                    update.state_path().write_text(json.dumps({
+                        "offer": offer,
+                        update._STAGED_FIELD: {
+                            **update._offer_identity(offer),
+                            "status": "ready",
+                            "error": "",
+                        },
+                    }), encoding="utf-8")
+                    with mock.patch.object(
+                        update, "download_verified",
+                        side_effect=AssertionError("apply must use prepared bytes"),
+                    ), \
                         mock.patch("subprocess.Popen", lambda args, **kw: seen.append(args)):
-                    update.apply_update({"asset": "s-setup.exe", "version": "9.9.9"})
+                        update.apply_update(offer)
             finally:
                 # Production exits here; the test substitutes Popen and must
                 # model that exit before its temporary SANDGLASS_HOME is removed.

@@ -93,10 +93,11 @@ class WebLocalizationTests(unittest.TestCase):
         node_program = (
             normalizer + "\n" +
             "process.stdout.write(JSON.stringify([" +
-            "normalizeUpdateOffer({version: '2.0.0', apply_supported: true})," +
-            "normalizeUpdateOffer({version: '2.0.0', apply_supported: false})," +
-            "normalizeUpdateOffer({version: '2.0.0'})," +
-            "normalizeUpdateOffer({apply_supported: true})" +
+            "normalizeUpdateOffer({version: '2.0.0', ready: true, apply_supported: true})," +
+            "normalizeUpdateOffer({version: '2.0.0', ready: true, apply_supported: false})," +
+            "normalizeUpdateOffer({version: '2.0.0', ready: true})," +
+            "normalizeUpdateOffer({ready: true, apply_supported: true})," +
+            "normalizeUpdateOffer({version: '2.0.0', ready: false, apply_supported: true})" +
             "]));"
         )
         completed = subprocess.run(
@@ -108,6 +109,7 @@ class WebLocalizationTests(unittest.TestCase):
         self.assertIsNone(offers[1])
         self.assertIsNone(offers[2])
         self.assertIsNone(offers[3])
+        self.assertIsNone(offers[4])
 
     def test_update_badge_click_and_busy_close_guard_are_real_state_machine_behaviors(self):
         """Run the page's actual badge handler and close guard in Node.
@@ -218,6 +220,78 @@ let fetch = async (url) => url.includes("announcement/dismiss")
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_refreshing_an_old_ready_offer_keeps_status_polling_for_the_new_one(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        script = INDEX.read_text(encoding="utf-8").rsplit(
+            "<script>", 1
+        )[-1].split("</script>", 1)[0]
+        normalizer = script[
+            script.index("    function normalizeUpdateOffer("):
+            script.index("    async function loadUpdate(")
+        ]
+        load_fn = script[
+            script.index("    async function loadUpdate("):
+            script.index("    async function loadAnnouncement(")
+        ]
+        program = r"""
+const state={update:null,updatePreparing:false};let renders=0;
+function render(){renders++;}
+const responses=[
+  {version:"9.9.8",ready:true,preparing:true,apply_supported:true},
+  {version:"9.9.9",ready:true,preparing:false,apply_supported:true},
+];
+let fetch=async()=>({ok:true,json:async()=>responses.shift()});
+""" + normalizer + load_fn + r"""
+(async()=>{
+  await loadUpdate();
+  if(!state.update||state.update.version!=="9.9.8"||!state.updatePreparing)
+    throw new Error("old ready offer stopped preparation polling");
+  await loadUpdateStatus();
+  if(!state.update||state.update.version!=="9.9.9"||state.updatePreparing)
+    throw new Error("new prepared identity did not replace old ready offer");
+})().catch((error)=>{console.error(error.message);process.exit(1);});
+"""
+        completed = subprocess.run(
+            [node, "-e", program], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_stale_or_unready_click_withdraws_badge_and_polls_local_status(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        script = INDEX.read_text(encoding="utf-8").rsplit(
+            "<script>", 1
+        )[-1].split("</script>", 1)[0]
+        apply_fn = script[
+            script.index("    async function applyUpdate() {"):
+            script.index("    function runtimeWarningHtml() {")
+        ]
+        program = r"""
+const state={updateApplying:false,update:{version:"9.9.9"},
+  updateDialogOpen:true,announcementOpen:false,updateError:"",updatePreparing:false};
+let nextError="";function render(){}
+let fetch=async()=>({ok:true,json:async()=>({ok:false,error:nextError})});
+""" + apply_fn + r"""
+(async()=>{
+  for(const error of ["update_not_ready","stale_update","no_update"]){
+    state.updateApplying=false;state.update={version:"9.9.9"};
+    state.updateDialogOpen=true;state.updatePreparing=false;nextError=error;
+    await applyUpdate();
+    if(state.update!==null||!state.updatePreparing||state.updateDialogOpen||state.updateApplying)
+      throw new Error("stale click state survived: "+error);
+  }
+})().catch((error)=>{console.error(error.message);process.exit(1);});
+"""
+        completed = subprocess.run(
+            [node, "-e", program], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_announcement_notes_are_escaped_by_the_real_browser_function(self):
         """Run the page's pure notes renderer in Node without adding a DOM dependency."""
         node = shutil.which("node")
@@ -253,6 +327,9 @@ let fetch = async (url) => url.includes("announcement/dismiss")
         self.assertIn('force ? "/api/update?force=1" : "/api/update"', script)
         self.assertIn('state.update = normalizeUpdateOffer(offer);', script)
         self.assertIn('offer.apply_supported === true', script)
+        self.assertIn('offer.ready === true', script)
+        self.assertIn('fetch("/api/update/status")', script)
+        self.assertIn('state.updatePreparing = offer && offer.preparing === true;', script)
         self.assertIn('loadUpdate();\n    loadAnnouncement();\n    startUpdatePoll();', script)
         self.assertEqual(script.count('fetch("/api/update/apply"'), 1)
 
@@ -260,7 +337,7 @@ let fetch = async (url) => url.includes("announcement/dismiss")
         catalog = I18N.read_text(encoding="utf-8")
         for key in (
             "updateTooltip", "updateConfirmTitle", "updateConfirmDescription",
-            "updateCancel", "updateInstallRestart", "announcementTitle",
+            "updateCopy", "updateCancel", "updateInstallRestart", "announcementTitle",
             "announcementDismiss", "announcementClose",
         ):
             self.assertEqual(catalog.count(key + ":"), 10, key)
@@ -898,9 +975,43 @@ let fetch = async (url) => url.includes("announcement/dismiss")
         script = html.rsplit("<script>", 1)[-1].split("</script>", 1)[0]
         start_poll = script.split("function startPoll() {", 1)[1].split("}", 1)[0]
 
-        self.assertIn("setInterval(loadQuota, POLL_MS)", start_poll)
+        self.assertIn("if (state.productMode.selected) loadQuota();", start_poll)
+        self.assertIn("if (state.updatePreparing", start_poll)
+        self.assertIn("loadUpdateStatus();", start_poll)
         self.assertIn("const POLL_MS = 20000", script)
         self.assertNotIn("reduceMotion", start_poll)
+
+    def test_existing_poll_reads_prepare_status_without_quota_before_mode(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is not installed")
+        script = INDEX.read_text(encoding="utf-8").rsplit(
+            "<script>", 1
+        )[-1].split("</script>", 1)[0]
+        start_poll = script[
+            script.index("    function startPoll() {"):
+            script.index("    function startUpdatePoll() {")
+        ]
+        program = (
+            "let quota=0,status=0;"
+            "const state={productMode:{selected:false},updatePreparing:true,"
+            "updateApplying:false,updateDialogOpen:false,announcementOpen:false};"
+            "const POLL_MS=20000;let poll=null,stampTick=null;"
+            "function clearInterval(){}"
+            "function setInterval(fn){if(typeof fn==='function')fn();return 1;}"
+            "function loadQuota(){quota++;}"
+            "function loadUpdateStatus(){status++;}"
+            "function paintStamps(){}"
+            + start_poll +
+            "startPoll();const before=[quota,status];"
+            "state.productMode.selected=true;state.updatePreparing=false;startPoll();"
+            "process.stdout.write(JSON.stringify([before,[quota,status]]));"
+        )
+        completed = subprocess.run(
+            [node, "-e", program], capture_output=True, text=True,
+            encoding="utf-8", check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout), [[0, 1], [1, 1]])
 
     def test_onboarding_requires_an_explicit_attribution_path(self):
         html = INDEX.read_text(encoding="utf-8")
