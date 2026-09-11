@@ -1,6 +1,8 @@
+import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -37,6 +39,30 @@ from tools.windows_release import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _top_level_package_versions(source: str) -> list[str]:
+    values = []
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "__version__"
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            values.append(node.value.value)
+    return values
+
+
+def _installer_versions(source: str) -> list[str]:
+    return re.findall(
+        r'^\s*!define\s+APPVERSION\s+"([^"\r\n]+)"\s*$',
+        source,
+        flags=re.MULTILINE,
+    )
+
+
 class ReleaseMetadataTests(unittest.TestCase):
     def test_version_sources_agree(self):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -44,8 +70,22 @@ class ReleaseMetadataTests(unittest.TestCase):
         installer = (ROOT / "packaging" / "sandglass.nsi").read_text(encoding="utf-8")
         version = metadata["project"]["version"]
 
-        self.assertIn(f'__version__ = "{version}"', package_source)
-        self.assertIn(f'!define APPVERSION "{version}"', installer)
+        self.assertEqual(_top_level_package_versions(package_source), [version])
+        self.assertEqual(_installer_versions(installer), [version])
+
+    def test_version_parsers_ignore_comments_and_dead_string_decoys(self):
+        package_source = (
+            '__version__ = "1.2.3"\n'
+            'decoy = \'__version__ = "9.9.9"\'\n'
+            '# __version__ = "8.8.8"\n'
+            '\'__version__ = "7.7.7"\'\n'
+        )
+        installer_source = (
+            '; !define APPVERSION "9.9.9"\n'
+            '!define APPVERSION "1.2.3"\n'
+        )
+        self.assertEqual(_top_level_package_versions(package_source), ["1.2.3"])
+        self.assertEqual(_installer_versions(installer_source), ["1.2.3"])
 
     def test_project_declares_its_build_backend(self):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
