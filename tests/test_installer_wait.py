@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,8 @@ class _ObservedProcess:
         self.pid = pid
         self.kernel32 = _kernel32()
         self.handle = self.kernel32.OpenProcess(
-            0x100000 | 0x1000, False, pid  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+            0x0001 | 0x100000 | 0x1000, False, pid
+            # PROCESS_TERMINATE | SYNCHRONIZE | QUERY_LIMITED_INFORMATION
         )
         self.open_error = None if self.handle else ctypes.get_last_error()
 
@@ -119,6 +121,19 @@ class _ObservedProcess:
             "times_error": times_error,
         }
 
+    def terminate(self) -> bool:
+        """Terminate this exact observed process and confirm it is reaped."""
+        if not self.handle:
+            return False
+        before = self.snapshot()
+        if before.get("state") == "exited":
+            return True
+        if before.get("state") != "running":
+            return False
+        if not self.kernel32.TerminateProcess(self.handle, 1):
+            return False
+        return self.kernel32.WaitForSingleObject(self.handle, 5000) == 0
+
     def close(self) -> None:
         if self.handle:
             self.kernel32.CloseHandle(self.handle)
@@ -141,16 +156,89 @@ def _alive(pid: int) -> bool:
         kernel32.CloseHandle(process)
 
 
-def _terminate(pid: int) -> None:
-    if os.name != "nt" or not _alive(pid):
-        return
-    kernel32 = _kernel32()
-    process = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
-    if process:
+def _observed_from_spawn_receipt(
+    receipt: Path,
+) -> tuple[_ObservedProcess | None, str | None]:
+    """Open only the exact PID+creation identity written by the fake parent."""
+    try:
+        parts = receipt.read_text(encoding="ascii").split("|")
+        if len(parts) != 3:
+            raise ValueError("spawn receipt must contain three fields")
+        pid = int(parts[0])
+        expected_creation = int(parts[2])
+        if pid <= 0 or expected_creation <= 0:
+            raise ValueError("spawn receipt identity must be positive")
+    except FileNotFoundError:
+        return None, None
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return None, f"spawn receipt unreadable:{type(exc).__name__}"
+    observed = _ObservedProcess(pid)
+    snapshot = observed.snapshot()
+    if (
+        snapshot.get("state") == "unknown"
+        or snapshot.get("creation_100ns") != expected_creation
+    ):
+        observed.close()
+        return None, (
+            "spawn receipt identity mismatch: "
+            f"expected pid={pid} creation={expected_creation}; "
+            f"observed={snapshot!r}"
+        )
+    return observed, None
+
+
+def _close_process_pipes(process) -> None:
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None and not stream.closed:
+            stream.close()
+
+
+def _cleanup_test_process(process, observed: _ObservedProcess | None,
+                          spawned: Path) -> list[str]:
+    """Reap only proven test processes and return any cleanup failures."""
+    failures = []
+    if process.poll() is None:
         try:
-            kernel32.TerminateProcess(process, 1)
+            process.kill()
+        except OSError as exc:
+            failures.append(f"outer kill failed:{type(exc).__name__}")
+    owned = observed
+    if owned is None:
+        owned, receipt_error = _observed_from_spawn_receipt(spawned)
+        if receipt_error:
+            failures.append(receipt_error)
+        elif owned is None:
+            failures.append(
+                "spawn receipt not observed; descendant cleanup is unknown"
+            )
+    if owned is not None:
+        try:
+            if not owned.terminate():
+                failures.append(
+                    f"descendant was not reaped: {owned.snapshot()!r}"
+                )
         finally:
-            kernel32.CloseHandle(process)
+            owned.close()
+    try:
+        process.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failures.append(f"outer reap failed:{type(exc).__name__}")
+    try:
+        _close_process_pipes(process)
+    except OSError as exc:
+        failures.append(f"outer pipe close failed:{type(exc).__name__}")
+    return failures
+
+
+def _report_cleanup_failures(test: unittest.TestCase, failures: list[str]) -> None:
+    if not failures:
+        return
+    message = "test process cleanup failed: " + "; ".join(failures)
+    active = sys.exception()
+    if active is not None and hasattr(active, "add_note"):
+        active.add_note(message)
+        return
+    test.fail(message)
 
 
 def _cpu_seconds(pid: int):
@@ -291,6 +379,11 @@ def _assert_communicate_times_out(
                 f"outer_returncode={outer_returncode}; "
                 f"descendant={descendant_state!r}; context={context!r}"
             )
+        if descendant is not None and descendant_state.get("state") != "running":
+            raise AssertionError(
+                "outer remained open but the measured descendant was not running: "
+                f"descendant={descendant_state!r}; context={context!r}"
+            )
         return
     elapsed = time.monotonic() - started
     descendant_state = descendant.snapshot() if descendant else None
@@ -301,10 +394,189 @@ def _assert_communicate_times_out(
     )
 
 
+def _powershell_code_without_literals(line: str) -> str:
+    """Keep only executable tokens from one bounded invocation line."""
+    output = []
+    quote = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'" and index + 1 < len(line) and line[index + 1] == "'":
+                output.extend("  ")
+                index += 2
+                continue
+            if char == "'":
+                quote = None
+            output.append(" ")
+        elif quote == '"':
+            if char == "`" and index + 1 < len(line):
+                output.extend("  ")
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            output.append(" ")
+        elif char == "#":
+            break
+        elif char in {"'", '"'}:
+            quote = char
+            output.append(" ")
+        elif char == "`" and index + 1 < len(line):
+            output.extend("  ")
+            index += 2
+            continue
+        else:
+            output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _start_process_parameters(block: str) -> tuple[str, ...]:
+    """Return only parameters on the extracted Start-Process invocation.
+
+    This is intentionally bounded to the launch shape in the smoke script, but
+    it consumes the whole logical statement. A real parameter after
+    ``-WindowStyle`` or on a backtick continuation cannot hide beyond a marker,
+    while a mention in a comment or quoted argument is not a parameter.
+    """
+    statement_lines = []
+    depth = 0
+    started = False
+    for raw_line in block.splitlines():
+        code = _powershell_code_without_literals(raw_line)
+        if not started:
+            if "Start-Process" not in code:
+                continue
+            code = code[code.index("Start-Process"):]
+            started = True
+        statement_lines.append(code)
+        depth += code.count("(") - code.count(")")
+        if depth <= 0 and not code.rstrip().endswith("`"):
+            break
+    if not started or not statement_lines:
+        raise ValueError("the extracted block has no Start-Process invocation")
+    statement = "\n".join(statement_lines)
+    splats = re.findall(r"(?<!\S)@([A-Za-z_][A-Za-z0-9_]*)\b", statement)
+    if splats:
+        raise ValueError(f"Start-Process splatting is not allowed: {splats}")
+    return tuple(
+        re.findall(r"(?<!\S)-([A-Za-z][A-Za-z0-9]*)\b", statement)
+    )
+
+
 @unittest.skipUnless(
     os.name == "nt" and _powershells(), "Windows PowerShell is required"
 )
 class InstallerWaitTests(unittest.TestCase):
+    def test_start_process_parameter_parser_measures_the_whole_invocation(self):
+        expected = ("FilePath", "PassThru", "WindowStyle")
+        self.assertEqual(
+            _start_process_parameters(
+                "$p = Start-Process -FilePath 'contains # and -Wait' "
+                "-PassThru -WindowStyle Hidden # -Wait is only a comment\n"
+                "$after = 1\n"
+            ),
+            expected,
+        )
+        for invocation in (
+            "$p = Start-Process -FilePath 'a' -Wait -PassThru -WindowStyle Hidden\n",
+            "$p = Start-Process -FilePath 'a' -PassThru -WindowStyle Hidden -Wait\n",
+            "$p = Start-Process -FilePath 'a' -PassThru -WindowStyle Hidden `\n"
+            "  -Wait\n",
+        ):
+            with self.subTest(invocation=invocation):
+                self.assertIn("Wait", _start_process_parameters(invocation))
+        for invocation in (
+            "$p = Start-Process @waitArgs -FilePath 'a' "
+            "-PassThru -WindowStyle Hidden\n",
+            "$p = Start-Process -FilePath 'a' -PassThru "
+            "-WindowStyle Hidden @waitArgs\n",
+        ):
+            with self.subTest(splat=invocation):
+                with self.assertRaisesRegex(ValueError, "splatting"):
+                    _start_process_parameters(invocation)
+
+    def test_spawn_receipt_reaps_child_when_handshake_is_missing_or_bad(self):
+        with tempfile.TemporaryDirectory(prefix="sandglass-bad-handshake-") as tmp:
+            root = Path(tmp)
+            spawned = root / "spawned.txt"
+            handshake = root / "handshake.txt"
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            observed = _ObservedProcess(child.pid)
+            outer = subprocess.Popen(
+                [sys.executable, "-c", "pass"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                creation = observed.snapshot()["creation_100ns"]
+                spawned.write_text(f"{child.pid}|0|{creation}", encoding="ascii")
+                handshake.write_text("partial", encoding="ascii")
+                self.assertEqual(
+                    _cleanup_test_process(outer, None, spawned), []
+                )
+                self.assertEqual(observed.snapshot()["state"], "exited")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+                if outer.poll() is None:
+                    outer.kill()
+                    outer.wait(timeout=5)
+                _close_process_pipes(outer)
+                observed.close()
+
+    def test_stale_spawn_receipt_never_terminates_a_reused_pid(self):
+        with tempfile.TemporaryDirectory(prefix="sandglass-stale-receipt-") as tmp:
+            receipt = Path(tmp) / "spawned.txt"
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            observed = _ObservedProcess(child.pid)
+            outer = subprocess.Popen(
+                [sys.executable, "-c", "pass"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                actual_creation = observed.snapshot()["creation_100ns"]
+                receipt.write_text(
+                    f"{child.pid}|0|{actual_creation + 1}", encoding="ascii"
+                )
+                failures = _cleanup_test_process(outer, None, receipt)
+                self.assertTrue(
+                    any("identity mismatch" in failure for failure in failures),
+                    failures,
+                )
+                self.assertEqual(observed.snapshot()["state"], "running")
+            finally:
+                self.assertTrue(observed.terminate())
+                child.wait(timeout=5)
+                if outer.poll() is None:
+                    outer.kill()
+                    outer.wait(timeout=5)
+                _close_process_pipes(outer)
+                observed.close()
+
+    def test_missing_spawn_receipt_is_reported_as_cleanup_unknown(self):
+        with tempfile.TemporaryDirectory(prefix="sandglass-missing-receipt-") as tmp:
+            outer = subprocess.Popen(
+                [sys.executable, "-c", "pass"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            failures = _cleanup_test_process(
+                outer, None, Path(tmp) / "missing-spawned.txt"
+            )
+            self.assertIn(
+                "spawn receipt not observed; descendant cleanup is unknown",
+                failures,
+            )
+
     def test_post_install_wait_requires_both_runtime_owners(self):
         """An ephemeral packaged PID is not evidence that the app is ready."""
         source = SMOKE.read_text(encoding="utf-8")
@@ -545,6 +817,32 @@ class InstallerWaitTests(unittest.TestCase):
         ):
             _assert_communicate_times_out(
                 ExitedOuterWithOpenPipes(), timeout=3,
+            )
+
+    def test_pipe_timeout_is_not_success_after_measured_descendant_exited(self):
+        class LiveOuter:
+            returncode = None
+
+            @staticmethod
+            def communicate(timeout):
+                raise subprocess.TimeoutExpired(["fixture"], timeout)
+
+            @staticmethod
+            def poll():
+                return None
+
+        class ExitedDescendant:
+            @staticmethod
+            def snapshot():
+                return {"pid": 123, "state": "exited", "exit_code": 0}
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "measured descendant was not running",
+        ):
+            _assert_communicate_times_out(
+                LiveOuter(), timeout=3, descendant=ExitedDescendant(),
+                context={"fixture": "descendant-exited"},
             )
 
     def test_the_packaged_self_test_gate_reads_the_process_exit_code(self):
@@ -792,7 +1090,7 @@ class InstallerWaitTests(unittest.TestCase):
                         try:
                             holder_process.communicate(timeout=5)
                         except subprocess.TimeoutExpired:
-                            _terminate(holder_process.pid)
+                            holder_process.kill()
                             holder_process.wait(timeout=2)
 
     def test_extracted_launch_blocks_return_for_both_exit_codes(self):
@@ -800,9 +1098,10 @@ class InstallerWaitTests(unittest.TestCase):
 
         The fake installer parent records a long-lived child, then exits with
         the requested installer result.  The child is the same shape as NSIS's
-        silent post-install Exec.  The launch blocks are extracted from the
-        smoke script, so restoring process-tree ``-Wait`` makes the bounded
-        communicate call fail instead of producing a false pass.
+        silent post-install Exec. The launch blocks are extracted from the
+        smoke script and executed. A separate deterministic fault waits on the
+        observed descendant itself; it does not depend on Start-Process's
+        timing-sensitive internal JobObject attachment.
         """
         source = SMOKE.read_text(encoding="utf-8")
         first_start = source.index("$process = Start-Process")
@@ -819,6 +1118,13 @@ class InstallerWaitTests(unittest.TestCase):
             (second_block, "$again", "$againExitCode"),
             (third_block, "$reinstall", "$reinstallExitCode"),
         )
+        expected_parameters = ("FilePath", "ArgumentList", "PassThru", "WindowStyle")
+        for block, process_variable, _exit_variable in blocks:
+            self.assertEqual(
+                _start_process_parameters(block),
+                expected_parameters,
+                f"{process_variable} must launch without process-tree -Wait",
+            )
         mutex_start = source.index("function Test-MutexHeld")
         mutex_end = source.index("function Wait-ForInstalledSandglass", mutex_start)
         mutex_function = source[mutex_start:mutex_end]
@@ -845,6 +1151,9 @@ class InstallerWaitTests(unittest.TestCase):
                 "$child = Start-Process -FilePath $env:FAKE_PS "
                 "-ArgumentList $sleeperArgs "
                 "-PassThru -WindowStyle Hidden\n"
+                "[IO.File]::WriteAllText($env:FAKE_SPAWNED, "
+                "\"$($child.Id)|$ExitCode|"
+                "$($child.StartTime.ToUniversalTime().ToFileTimeUtc())\")\n"
                 "exit $ExitCode\n",
                 encoding="utf-8",
             )
@@ -863,6 +1172,10 @@ class InstallerWaitTests(unittest.TestCase):
                             f"handshake-{Path(powershell).stem}-"
                             f"{process_variable[1:]}-{expected}.txt"
                         )
+                        spawned = root / (
+                            f"spawned-{Path(powershell).stem}-"
+                            f"{process_variable[1:]}-{expected}.txt"
+                        )
                         runner = root / (
                             f"run-{Path(powershell).stem}-"
                             f"{process_variable[1:]}-{expected}.ps1"
@@ -876,6 +1189,7 @@ class InstallerWaitTests(unittest.TestCase):
                             "$env:FAKE_HANDSHAKE = $args[4]\n"
                             "$env:FAKE_EXIT = $args[5]\n"
                             "$env:FAKE_SLEEPER_SCRIPT = $args[6]\n"
+                            "$env:FAKE_SPAWNED = $args[7]\n"
                             # The launch block also observes the operation
                             # mutex. Use its real read function and a unique
                             # name, never the live product's mutex.
@@ -903,6 +1217,7 @@ class InstallerWaitTests(unittest.TestCase):
                                 str(handshake),
                                 str(expected),
                                 str(sleeper_script),
+                                str(spawned),
                             ],
                             cwd=ROOT,
                             stdout=subprocess.PIPE,
@@ -910,6 +1225,7 @@ class InstallerWaitTests(unittest.TestCase):
                             text=True,
                         )
                         child_pid = None
+                        observed_child = None
                         try:
                             deadline = time.monotonic() + 15
                             while time.monotonic() < deadline and not handshake.exists():
@@ -921,9 +1237,10 @@ class InstallerWaitTests(unittest.TestCase):
                                     f"stdout={stdout!r} stderr={stderr!r}"
                                 )
                             child_pid, recorded = map(int, handshake.read_text().split("|"))
+                            observed_child = _ObservedProcess(child_pid)
                             self.assertEqual(recorded, expected)
-                            self.assertTrue(
-                                _alive(child_pid),
+                            self.assertEqual(
+                                observed_child.snapshot()["state"], "running",
                                 "descendant exited before wait returned",
                             )
                             try:
@@ -934,27 +1251,37 @@ class InstallerWaitTests(unittest.TestCase):
                                     f"descendant {child_pid} remained alive: {exc}"
                                 )
                             self.assertEqual(process.returncode, expected, stderr)
-                            self.assertTrue(
-                                _alive(child_pid),
+                            self.assertEqual(
+                                observed_child.snapshot()["state"], "running",
                                 "descendant must outlive direct-process wait",
                             )
                         finally:
-                            if process.poll() is None:
-                                process.kill()
-                                process.wait(timeout=2)
-                            if child_pid is not None:
-                                _terminate(child_pid)
+                            _report_cleanup_failures(
+                                self,
+                                _cleanup_test_process(
+                                    process, observed_child, spawned
+                                ),
+                            )
 
-                # Mutation: restoring Start-Process -Wait to the reinstall
-                # launch makes PowerShell wait for the fake installer's
-                # long-lived grandchild.  This must time out; a source-text
-                # assertion alone would not distinguish the two mechanisms.
-                reinstall_mutant = third_block.replace(
-                    "-PassThru", "-Wait -PassThru", 1
+                # Deterministic behavior mutation: after the unchanged real
+                # reinstall block has observed its direct exit, explicitly
+                # wait on the still-running descendant. This is the forbidden
+                # process-tree behavior without relying on Start-Process's
+                # race-prone internal JobObject registration.
+                handshake = root / f"handshake-{Path(powershell).stem}-tree-mutant.txt"
+                spawned = root / f"spawned-{Path(powershell).stem}-tree-mutant.txt"
+                mutation_ready = root / f"ready-{Path(powershell).stem}-tree-mutant.txt"
+                runner = root / f"run-{Path(powershell).stem}-tree-mutant.ps1"
+                quoted_ready = str(mutation_ready).replace("'", "''")
+                descendant_wait = (
+                    "$descendantParts = ([IO.File]::ReadAllText("
+                    "$env:FAKE_SPAWNED)).Split('|')\n"
+                    "$descendantPid = [int]$descendantParts[0]\n"
+                    "$descendant = [Diagnostics.Process]::GetProcessById($descendantPid)\n"
+                    f"[IO.File]::WriteAllText('{quoted_ready}', "
+                    '"$($reinstall.Id)|$reinstallExitCode|$descendantPid")\n'
+                    '$null = Wait-DirectProcessExit $descendant 120 "Descendant mutant"\n'
                 )
-                self.assertNotEqual(reinstall_mutant, third_block)
-                handshake = root / f"handshake-{Path(powershell).stem}-reinstall-mutant.txt"
-                runner = root / f"run-{Path(powershell).stem}-reinstall-mutant.ps1"
                 runner.write_text(
                     "$ErrorActionPreference = 'Stop'\n"
                     "$installerPath = $args[0]\n"
@@ -964,10 +1291,12 @@ class InstallerWaitTests(unittest.TestCase):
                     "$env:FAKE_HANDSHAKE = $args[4]\n"
                     "$env:FAKE_EXIT = $args[5]\n"
                     "$env:FAKE_SLEEPER_SCRIPT = $args[6]\n"
+                    "$env:FAKE_SPAWNED = $args[7]\n"
                     + mutex_function
                     + wait_function
                     + f"$mutationMutexName = 'Local\\SandglassTests.Wait.ReinstallMutant.{uuid.uuid4().hex}'\n"
-                    + reinstall_mutant
+                    + third_block
+                    + descendant_wait
                     + "if ($reinstallExitCode -ne [int]$args[5]) { exit 41 }\n"
                     + "exit $reinstallExitCode\n",
                     encoding="utf-8",
@@ -979,6 +1308,7 @@ class InstallerWaitTests(unittest.TestCase):
                         "Bypass", "-File", str(runner), str(launcher),
                         str(root / "install-dir"), powershell, str(parent),
                         str(handshake), "0", str(sleeper_script),
+                        str(spawned),
                     ],
                     cwd=ROOT,
                     stdout=subprocess.PIPE,
@@ -990,14 +1320,30 @@ class InstallerWaitTests(unittest.TestCase):
                 observed_child = None
                 try:
                     deadline = time.monotonic() + 10
-                    while time.monotonic() < deadline and not handshake.exists():
+                    while time.monotonic() < deadline and (
+                        not mutation_ready.exists() or not handshake.exists()
+                    ):
                         time.sleep(0.05)
-                    self.assertTrue(handshake.exists(), "-Wait mutant did not publish handshake")
+                    if not mutation_ready.exists() or not handshake.exists():
+                        stdout, stderr = mutated_process.communicate(timeout=2)
+                        self.fail(
+                            "descendant-wait mutant did not report entering the bad wait: "
+                            f"ready={mutation_ready.exists()} "
+                            f"handshake={handshake.exists()}; "
+                            f"returncode={mutated_process.returncode}; "
+                            f"stdout={stdout!r} stderr={stderr!r}"
+                        )
                     handshake_observed_ns = time.monotonic_ns()
                     mutant_child_pid, recorded = map(int, handshake.read_text().split("|"))
                     observed_child = _ObservedProcess(mutant_child_pid)
                     initial_child = observed_child.snapshot()
                     sleeper_observed_ns = time.monotonic_ns()
+                    direct_pid, direct_exit, ready_child_pid = map(
+                        int, mutation_ready.read_text(encoding="ascii").split("|")
+                    )
+                    self.assertGreater(direct_pid, 0)
+                    self.assertEqual(direct_exit, 0)
+                    self.assertEqual(ready_child_pid, mutant_child_pid)
                     self.assertEqual(recorded, 0)
                     self.assertEqual(initial_child["state"], "running", initial_child)
                     _assert_communicate_times_out(
@@ -1018,14 +1364,16 @@ class InstallerWaitTests(unittest.TestCase):
                             "sleeper_report": handshake.read_text(encoding="ascii").strip(),
                         },
                     )
+                    self.assertTrue(observed_child.terminate())
+                    stdout, stderr = mutated_process.communicate(timeout=5)
+                    self.assertEqual(mutated_process.returncode, 0, stdout + stderr)
                 finally:
-                    if mutated_process.poll() is None:
-                        mutated_process.kill()
-                        mutated_process.wait(timeout=2)
-                    if mutant_child_pid is not None:
-                        _terminate(mutant_child_pid)
-                    if observed_child is not None:
-                        observed_child.close()
+                    _report_cleanup_failures(
+                        self,
+                        _cleanup_test_process(
+                            mutated_process, observed_child, spawned
+                        ),
+                    )
 
     def test_timeout_diagnostic_reports_early_error(self):
         """An early installer error exposes its exit code and stderr."""
