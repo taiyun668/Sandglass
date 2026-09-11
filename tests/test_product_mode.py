@@ -1,10 +1,16 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
+from functools import partial
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+from sandglass import live_snapshot, serve
 from sandglass.product_mode import (
     attribution_mode,
     mode_payload,
@@ -15,6 +21,17 @@ from sandglass.serve import api_payload
 
 
 class ProductModeTests(unittest.TestCase):
+    @staticmethod
+    def _snapshot_mode() -> dict[str, object]:
+        stored = json.loads(live_snapshot.snapshot_path().read_text(encoding="utf-8"))
+        return stored["readings"]["product_mode"]["value"]
+
+    def _snapshot_context(self, tmp):
+        return (
+            patch.dict(os.environ, {"SANDGLASS_HOME": tmp}, clear=False),
+            patch.dict(live_snapshot._LAST_WRITE, {}, clear=True),
+        )
+
     def test_mode_is_unselected_until_the_user_chooses(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ, {"SANDGLASS_HOME": tmp}, clear=False
@@ -44,6 +61,88 @@ class ProductModeTests(unittest.TestCase):
                 "single_official",
             )
             self.assertEqual(list(Path(tmp).glob(".*.tmp")), [])
+
+    def test_native_post_immediately_replaces_the_unselected_snapshot(self):
+        from sandglass import desktop
+
+        class Receiver:
+            @staticmethod
+            def status():
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            environment, last_write = self._snapshot_context(tmp)
+            old_role = live_snapshot._ROLE
+            with environment, last_write:
+                live_snapshot.set_role("panel")
+                try:
+                    live_snapshot.record("product_mode", mode_payload())
+                    self.assertFalse(self._snapshot_mode()["selected"])
+                    returned = desktop._desktop_api(
+                        Receiver(), "POST", "/api/product-mode",
+                        '{"attribution_mode":"single_official"}',
+                    )
+                    self.assertEqual(returned["attribution_mode"], "single_official")
+                    self.assertEqual(self._snapshot_mode(), returned)
+                finally:
+                    live_snapshot.set_role(old_role)
+
+    def test_http_post_immediately_replaces_the_unselected_snapshot(self):
+        handler = partial(
+            serve.Handler, since=None, live_quota=False, allow_otlp=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            environment, last_write = self._snapshot_context(tmp)
+            old_role = live_snapshot._ROLE
+            with environment, last_write:
+                live_snapshot.set_role("panel")
+                server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    live_snapshot.record("product_mode", mode_payload())
+                    self.assertFalse(self._snapshot_mode()["selected"])
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/product-mode",
+                        method="POST",
+                        data=b'{"attribution_mode":"skill_assisted"}',
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        returned = json.loads(response.read())
+                    self.assertEqual(returned["attribution_mode"], "skill_assisted")
+                    self.assertEqual(self._snapshot_mode(), returned)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+                    live_snapshot.set_role(old_role)
+                self.assertFalse(thread.is_alive())
+
+    def test_rejected_native_post_does_not_replace_the_snapshot(self):
+        from sandglass import desktop
+
+        class Receiver:
+            @staticmethod
+            def status():
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            environment, last_write = self._snapshot_context(tmp)
+            old_role = live_snapshot._ROLE
+            with environment, last_write:
+                live_snapshot.set_role("panel")
+                try:
+                    live_snapshot.record("product_mode", mode_payload())
+                    before = live_snapshot.snapshot_path().read_bytes()
+                    with self.assertRaises(ValueError):
+                        desktop._desktop_api(
+                            Receiver(), "POST", "/api/product-mode",
+                            '{"attribution_mode":"not-a-mode"}',
+                        )
+                    self.assertEqual(live_snapshot.snapshot_path().read_bytes(), before)
+                finally:
+                    live_snapshot.set_role(old_role)
 
     def test_invalid_mode_is_rejected_without_overwriting_the_choice(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(

@@ -103,15 +103,17 @@ class AttributionSelfCheckTests(unittest.TestCase):
         self.window["counted_from"] = (self.now - timedelta(hours=1, seconds=1)).isoformat()
         self.window["counted_to"] = (self.now + timedelta(hours=4, seconds=1)).isoformat()
         self.window["boundary_source"] = "anything-else"
-        self.assertTrue(self._check())
+        self.assertIs(
+            self._check(), self.serve.AttributionSelfCheckResult.VERIFIED
+        )
 
     def test_b_total_change_is_recorded(self):
         self.window["usage"]["total_tokens"] = 11
-        self.assertFalse(self._check())
+        self.assertIs(self._check(), self.serve.AttributionSelfCheckResult.FAILED)
 
     def test_c_day_change_is_recorded_even_when_total_is_same(self):
         self.window["days"][0]["spent"] = 11
-        self.assertFalse(self._check())
+        self.assertIs(self._check(), self.serve.AttributionSelfCheckResult.FAILED)
 
     def test_d_account_or_window_addition_is_recorded(self):
         added = Account(
@@ -119,14 +121,16 @@ class AttributionSelfCheckTests(unittest.TestCase):
             extra={"windows": [{"label": "5h"}]},
         )
         self.serve._local_cache["inputs"]["accounts"].append(added)
-        self.assertFalse(self._check())
+        self.assertIs(self._check(), self.serve.AttributionSelfCheckResult.FAILED)
 
     def test_e_existing_failure_is_cleared_after_recovery(self):
         with patch("sandglass.diagnostics.meter_home", return_value=self.meter):
             from sandglass.diagnostics import record_component_failure, runtime_diagnostics
             record_component_failure("attribution_self_check", RuntimeError("bad"))
             self.assertIn("attribution_self_check", runtime_diagnostics()["components"])
-            self.assertTrue(self._check())
+            self.assertIs(
+                self._check(), self.serve.AttributionSelfCheckResult.VERIFIED
+            )
             self.assertNotIn("attribution_self_check", runtime_diagnostics()["components"])
 
     def test_f_malformed_disk_does_not_clear_and_records(self):
@@ -136,7 +140,10 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch("sandglass.paths.meter_home", return_value=self.meter), \
              patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
              patch("sandglass.accounts.identity_source_stamp", return_value=self.stamp):
-            self.assertFalse(self.serve._check_attribution_self_check())
+            self.assertIs(
+                self.serve._check_attribution_self_check(),
+                self.serve.AttributionSelfCheckResult.FAILED,
+            )
             record.assert_called_once()
 
     def test_f_unstable_disk_does_not_clear_and_records(self):
@@ -147,13 +154,18 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch("sandglass.paths.meter_home", return_value=self.meter), \
              patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
              patch("sandglass.accounts.identity_source_stamp", return_value=self.stamp):
-            self.assertFalse(self.serve._check_attribution_self_check())
+            self.assertIs(
+                self.serve._check_attribution_self_check(),
+                self.serve.AttributionSelfCheckResult.FAILED,
+            )
             record.assert_called_once()
 
     def test_f_missing_inputs_does_not_clear_and_records(self):
         self.serve._local_cache["inputs"] = None
         with patch("sandglass.diagnostics.record_component_failure") as record:
-            self.assertFalse(self._check())
+            self.assertIs(
+                self._check(), self.serve.AttributionSelfCheckResult.FAILED
+            )
             record.assert_called_once()
 
     def test_f_identity_stamp_is_not_a_self_check_dependency(self):
@@ -161,7 +173,10 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
              patch("sandglass.accounts.identity_source_stamp", side_effect=AssertionError), \
              patch("sandglass.diagnostics.clear_component_failure") as clear:
-            self.assertTrue(self.serve._check_attribution_self_check())
+            self.assertIs(
+                self.serve._check_attribution_self_check(),
+                self.serve.AttributionSelfCheckResult.VERIFIED,
+            )
             clear.assert_called_once_with("attribution_self_check")
 
     def test_f_disk_owner_disagreement_is_detected(self):
@@ -170,13 +185,16 @@ class AttributionSelfCheckTests(unittest.TestCase):
             "at": (self.now - timedelta(hours=2)).isoformat(),
             "kind": "observed", "account_id": "other@example.com",
         }]}), encoding="utf-8")
-        self.assertFalse(self._check())
+        self.assertIs(self._check(), self.serve.AttributionSelfCheckResult.FAILED)
 
     def test_g_observer_never_executes_or_clears_panel_failure(self):
         self.live_snapshot.set_role("observer")
         with patch("sandglass.diagnostics.record_component_failure") as record, \
              patch("sandglass.diagnostics.clear_component_failure") as clear:
-            self.assertFalse(self.serve._check_attribution_self_check())
+            self.assertIs(
+                self.serve._check_attribution_self_check(),
+                self.serve.AttributionSelfCheckResult.NO_RESULT,
+            )
             record.assert_not_called()
             clear.assert_not_called()
 
@@ -187,7 +205,9 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch.object(self.serve, "load_accounts", side_effect=AssertionError), \
              patch.object(self.serve, "attach_live_quota", side_effect=AssertionError), \
              patch.object(accounts, "codex_identity_runs", side_effect=AssertionError):
-            self.assertTrue(self._check())
+            self.assertIs(
+                self._check(), self.serve.AttributionSelfCheckResult.VERIFIED
+            )
 
     def test_i_projection_key_keeps_provider_dimension(self):
         projection = self.serve._attribution_projection({"accounts": [
@@ -219,7 +239,9 @@ class AttributionSelfCheckTests(unittest.TestCase):
 
     def test_j_direct_checker_does_not_advance_success_heartbeat(self):
         with self._fresh_heartbeat() as diagnostics:
-            self.assertTrue(self._check())
+            self.assertIs(
+                self._check(), self.serve.AttributionSelfCheckResult.VERIFIED
+            )
             self.assertEqual(
                 diagnostics.attribution_self_check_heartbeat(),
                 {"last_ok_at": None, "check_count": 0, "state": "pending", "reason": ""},
@@ -270,7 +292,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
 
             def check():
                 calls.append(time.monotonic())
-                return True
+                return self.serve.AttributionSelfCheckResult.VERIFIED
 
             server = ThreadingHTTPServer(
                 ("127.0.0.1", 0),
@@ -383,9 +405,81 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch.object(serve, "_read_disk_identity_snapshot", side_effect=AssertionError), \
              patch("sandglass.diagnostics.record_component_failure") as record, \
              patch("sandglass.diagnostics.clear_component_failure") as clear:
-            self.assertTrue(serve._check_attribution_self_check())
+            self.assertIs(
+                serve._check_attribution_self_check(),
+                serve.AttributionSelfCheckResult.NO_CODEX,
+            )
         record.assert_not_called()
         clear.assert_called_once_with("attribution_self_check")
+
+    def test_k_no_codex_watcher_is_live_but_not_a_verified_replay(self):
+        from sandglass import diagnostics, live_snapshot, serve
+
+        day = self.now.date().isoformat()
+        serve._local_cache = {
+            "at": time.monotonic(),
+            "payload": {"accounts": [{
+                "provider": "claude",
+                "account_id": "claude-only",
+                "windows": [{
+                    "label": "5h",
+                    "usage": {"total_tokens": 0},
+                    "days": [{"day": day, "spent": 0}],
+                    "counted_from": (self.now - timedelta(hours=1)).isoformat(),
+                    "counted_to": (self.now + timedelta(hours=4)).isoformat(),
+                }],
+                "activity": {},
+            }]},
+            "identity_stamp": None,
+            "source_stamp": (),
+            "inputs": {"accounts": [], "sessions": [], "mode": ""},
+        }
+        stop = threading.Event()
+        calls = []
+        real_check = serve._check_attribution_self_check
+
+        def check():
+            result = real_check()
+            calls.append(result)
+            if len(calls) == 2:
+                stop.set()
+            return result
+
+        with self._fresh_heartbeat(), \
+             patch("sandglass.paths.meter_home", return_value=self.meter), \
+             patch("sandglass.diagnostics.meter_home", return_value=self.meter), \
+             patch("sandglass.live_snapshot.meter_home", return_value=self.meter), \
+             patch.object(serve, "_SNAPSHOT_WATCH_SECONDS", 0.01), \
+             patch.object(serve, "_check_attribution_self_check", side_effect=check):
+            watcher = serve._start_attribution_self_check_watch(stop)
+            watcher.join(timeout=2)
+            self.assertFalse(watcher.is_alive())
+            heartbeat = diagnostics.attribution_self_check_heartbeat()
+            stored = json.loads(
+                live_snapshot.snapshot_path().read_text(encoding="utf-8")
+            )
+            events = [
+                json.loads(line) for line in
+                diagnostics.attribution_self_check_events_path().read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual(
+            calls,
+            [serve.AttributionSelfCheckResult.NO_CODEX] * 2,
+        )
+        self.assertEqual(heartbeat["state"], "ok")
+        self.assertEqual(heartbeat["reason"], "no codex attribution")
+        self.assertEqual(heartbeat["check_count"], 2)
+        self.assertIsNotNone(heartbeat["last_ok_at"])
+        self.assertEqual(
+            stored["readings"]["attribution_self_check"]["value"], heartbeat
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["state"], "ok")
+        self.assertEqual(events[0]["reason"], "no codex attribution")
+        self.assertEqual(events[0]["check_count"], 1)
 
     def test_l_event_log_records_only_transitions(self):
         with self._fresh_heartbeat() as diagnostics, \
@@ -554,12 +648,17 @@ class AttributionSelfCheckTests(unittest.TestCase):
              patch("sandglass.paths.meter_home", return_value=self.meter), \
              patch("sandglass.diagnostics.meter_home", return_value=self.meter):
             self.window["usage"]["total_tokens"] = 11
-            self.assertFalse(self.serve._check_attribution_self_check())
+            self.assertIs(
+                self.serve._check_attribution_self_check(),
+                self.serve.AttributionSelfCheckResult.FAILED,
+            )
 
             self.window["usage"]["total_tokens"] = 10
             recovered = self.serve._check_attribution_self_check()
-            self.assertTrue(recovered)
-            if recovered:
+            self.assertIs(
+                recovered, self.serve.AttributionSelfCheckResult.VERIFIED
+            )
+            if recovered is self.serve.AttributionSelfCheckResult.VERIFIED:
                 record_attribution_self_check_success()
 
             lines = diagnostics.attribution_self_check_events_path().read_text(
@@ -582,7 +681,7 @@ class AttributionSelfCheckTests(unittest.TestCase):
 
         def check():
             stop.set()
-            return True
+            return self.serve.AttributionSelfCheckResult.VERIFIED
 
         with self._fresh_heartbeat(), \
              patch.object(self.serve, "_check_attribution_self_check", side_effect=check), \

@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+from enum import Enum
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import webbrowser
@@ -148,6 +149,19 @@ def _note_answer(kind: str, payload: object) -> object:
     else:
         value = payload
     live_snapshot.record(kind, value)
+    return payload
+
+
+def apply_product_mode(mode: str) -> dict[str, object]:
+    """Persist a product-mode choice and record the successful answer.
+
+    ``set_attribution_mode`` performs the atomic state write.  Recording only
+    after it returns keeps a rejected or failed POST from replacing the panel's
+    last known product-mode answer.  The fallback HTTP handler and native
+    bridge both use this shared path.
+    """
+    payload = set_attribution_mode(mode)
+    _note_answer("product_mode", payload)
     return payload
 
 
@@ -899,7 +913,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             try:
                 envelope = json.loads(self._read_body(length).decode("utf-8"))
-                result = set_attribution_mode(str(envelope.get("attribution_mode") or ""))
+                result = apply_product_mode(
+                    str(envelope.get("attribution_mode") or "")
+                )
             except (AttributeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                 self.send_error(400, str(exc))
                 return
@@ -1895,7 +1911,16 @@ def _self_check_window_projection(
     }
 
 
-def _check_attribution_self_check() -> bool:
+class AttributionSelfCheckResult(Enum):
+    """Explicit outcome of one panel attribution self-check attempt."""
+
+    VERIFIED = "verified"
+    NO_CODEX = "no_codex"
+    NO_RESULT = "no_result"
+    FAILED = "failed"
+
+
+def _check_attribution_self_check() -> AttributionSelfCheckResult:
     """Compare cached Codex attribution with an independent direct-disk replay."""
     from sandglass import live_snapshot
     from sandglass.diagnostics import (
@@ -1908,12 +1933,12 @@ def _check_attribution_self_check() -> bool:
     # The observer must never clear a panel's attribution result.  An unset
     # role is also non-authoritative, as are tests and helper processes.
     if getattr(live_snapshot, "_ROLE", "") != "panel":
-        return False
+        return AttributionSelfCheckResult.NO_RESULT
 
-    def fail(reason: str) -> bool:
+    def fail(reason: str) -> AttributionSelfCheckResult:
         record_component_failure("attribution_self_check", RuntimeError(reason))
         record_attribution_self_check_result("fail", reason)
-        return False
+        return AttributionSelfCheckResult.FAILED
 
     with _REPORT_LOCK:
         inputs = _local_cache.get("inputs")
@@ -1921,7 +1946,7 @@ def _check_attribution_self_check() -> bool:
         if cached_payload is None:
             # A panel that has not produced its first local-windows answer yet
             # is not an unhealthy attribution result.
-            return False
+            return AttributionSelfCheckResult.NO_RESULT
         if not isinstance(inputs, dict):
             return fail("attribution self-check inputs unavailable")
         try:
@@ -1931,10 +1956,11 @@ def _check_attribution_self_check() -> bool:
         codex_targets = {key for key in cached_projection if key[0] == "codex"}
         if not codex_targets:
             # This installation has no Codex attribution to verify.  Clear a
-            # stale result from an earlier account state, but do not touch the
-            # disk ledger or manufacture a failure for a non-applicable check.
+            # stale result from an earlier account state.  The watcher records
+            # this explicit outcome as a healthy ``no codex attribution``
+            # heartbeat; it is not a verified replay.
             clear_component_failure("attribution_self_check")
-            return True
+            return AttributionSelfCheckResult.NO_CODEX
 
         path = meter_home() / "codex-official-identity-events-v2.json"
         snapshot = _read_disk_identity_snapshot(path, "account_id", codex_v2_only=True)
@@ -1993,7 +2019,7 @@ def _check_attribution_self_check() -> bool:
         if cached_projection != fresh_projection:
             return fail("attribution self-check attribution facts disagree")
         clear_component_failure("attribution_self_check")
-        return True
+        return AttributionSelfCheckResult.VERIFIED
 
 
 def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thread:
@@ -2002,7 +2028,6 @@ def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thre
     from sandglass.diagnostics import (
         attribution_self_check_heartbeat,
         record_attribution_self_check_result,
-        record_attribution_self_check_success,
         record_component_failure,
     )
 
@@ -2011,8 +2036,13 @@ def _start_attribution_self_check_watch(stop: threading.Event) -> threading.Thre
             if getattr(live_snapshot, "_ROLE", "") != "panel":
                 return
             try:
-                if _check_attribution_self_check():
-                    record_attribution_self_check_success()
+                result = _check_attribution_self_check()
+                if result is AttributionSelfCheckResult.VERIFIED:
+                    record_attribution_self_check_result("ok")
+                elif result is AttributionSelfCheckResult.NO_CODEX:
+                    record_attribution_self_check_result(
+                        "ok", "no codex attribution"
+                    )
             except Exception as exc:  # noqa: BLE001 - self-check must not kill panel
                 if getattr(live_snapshot, "_ROLE", "") == "panel":
                     record_component_failure("attribution_self_check", exc)

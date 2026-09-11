@@ -47,12 +47,12 @@ from sandglass.native_panel import (
 from sandglass import live_snapshot
 from sandglass.accounts import state_file_lock
 from sandglass.paths import StateHomeAttestationError, meter_home, require_canonical_state_home
-from sandglass.product_mode import set_attribution_mode
 from sandglass.serve import (
     WEB_DIR,
     Handler,
     OtlpHandler,
     api_payload,
+    apply_product_mode,
     configure_user_source,
     _attribution_self_check_watch_context,
 )
@@ -528,7 +528,7 @@ def _desktop_api(receiver: TelemetryReceiver, method: str,
             envelope = json.loads(body)
         except (TypeError, ValueError):
             raise ValueError("product mode configuration must be JSON") from None
-        return set_attribution_mode(str(envelope.get("attribution_mode") or ""))
+        return apply_product_mode(str(envelope.get("attribution_mode") or ""))
     raise KeyError(parsed.path)
 
 
