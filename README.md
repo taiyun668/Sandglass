@@ -21,12 +21,26 @@ Choose this for normal use. It installs Sandglass for the current Windows user,
 creates Desktop and Start Menu shortcuts, launches the app, and supports future
 in-app updates. **Start at login stays off unless you enable it in Sandglass.**
 
+**Observed download prompt in one fresh-user acceptance:** On the test machine,
+Microsoft Edge with its English interface warned that this exact
+`Sandglass-0.1.10-windows-x64-unsigned-setup.exe` **isn't commonly downloaded**;
+the details showed **Publisher: Unknown**. The primary button was **Delete**.
+Clicking the arrow beside **Delete** exposed **Keep anyway**. This is an
+observation from that Edge/English-interface test machine only; other browsers
+or computers may behave differently.
+
 ### [Download the portable ZIP](https://github.com/taiyun668/Sandglass/releases/download/v0.1.10/Sandglass-0.1.10-windows-x64-unsigned-portable.zip)
 
 Choose this if you do not want to install. Extract the entire ZIP, open the
 `Sandglass` folder, and run `Sandglass.exe`. Do not run the EXE from inside the
 ZIP. A later in-app update intentionally moves a portable copy to the installed
 channel.
+
+## Uninstall
+
+For an installed copy, use **Settings → Apps → Installed apps → Sandglass → … →
+Uninstall**. Uninstalling leaves `%LOCALAPPDATA%\sandglass`, including the usage
+cache and settings. To remove those as well, manually delete that folder.
 
 > **Windows Smart App Control:** Sandglass is currently not
 > Authenticode-signed. When Smart App Control is enforcing, Windows may block
